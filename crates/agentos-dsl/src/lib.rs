@@ -12,9 +12,7 @@ mod interp;
 mod tests;
 mod parser;
 
-pub use ast::{Arg, Expr, Literal, Plan, PlanError, Stmt, MAX_LOOP_DEPTH};
+pub use ast::{Arg, Expr, Literal, Plan, PlanError, Stmt, MAX_EXPR_DEPTH, MAX_LOOP_DEPTH};
 pub use data::{PlanData, PlanValue};
-pub use interp::{
-    after_confirmation, run, Extractor, Interp, Limits, Outcome, Report, ToolHost,
-};
+pub use interp::{run, Extractor, Interp, Limits, Outcome, Report, ToolHost};
 pub use parser::parse;

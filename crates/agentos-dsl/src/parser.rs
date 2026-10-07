@@ -1,4 +1,4 @@
-use crate::ast::{Arg, Expr, Literal, Plan, PlanError, Stmt};
+use crate::ast::{Arg, Expr, Literal, Plan, PlanError, Stmt, MAX_EXPR_DEPTH};
 
 /// Tokenizer for the plan language.
 #[derive(Debug, Clone, PartialEq)]
@@ -271,14 +271,14 @@ fn parse_stmt(p: &mut Parser) -> Result<Stmt, PlanError> {
         "let" => {
             let name = p.ident()?;
             p.expect(Tok::Eq)?;
-            let value = parse_expr(p)?;
+            let value = parse_expr(p, 0)?;
             Ok(Stmt::Let {
                 name,
                 value,
             })
         }
         "report" => {
-            let value = parse_expr(p)?;
+            let value = parse_expr(p, 0)?;
             Ok(Stmt::Report {
                 value: Box::new(value),
             })
@@ -292,7 +292,7 @@ fn parse_stmt(p: &mut Parser) -> Result<Stmt, PlanError> {
                     message: "expected `in`".into(),
                 });
             }
-            let iter = parse_expr(p)?;
+            let iter = parse_expr(p, 0)?;
             p.expect(Tok::LBrace)?;
             let mut body = Vec::new();
             while !p.eat(&Tok::RBrace) {
@@ -318,33 +318,58 @@ fn parse_stmt(p: &mut Parser) -> Result<Stmt, PlanError> {
     }
 }
 
-fn parse_expr(p: &mut Parser) -> Result<Expr, PlanError> {
-    let base = parse_primary(p)?;
-    Ok(parse_postfix(p, base))
+/// Parse an expression, refusing to nest deeper than [`MAX_EXPR_DEPTH`].
+///
+/// `depth` counts enclosing sub-expressions and is threaded rather than held on
+/// the `Parser` so that the accounting is local to the call chain that spends
+/// the stack. The limit is enforced at the point of recursion *and* inside
+/// `parse_postfix`, which is iterative: a projection chain costs no stack to
+/// parse but produces an arbitrarily deep tree for `validate` and `eval` to
+/// walk, so the counter has to follow the tree depth, not the call depth.
+fn parse_expr(p: &mut Parser, depth: usize) -> Result<Expr, PlanError> {
+    if depth > MAX_EXPR_DEPTH {
+        return Err(too_deep());
+    }
+    let base = parse_primary(p, depth)?;
+    parse_postfix(p, depth, base)
 }
 
-fn parse_postfix(p: &mut Parser, mut expr: Expr) -> Expr {
+fn too_deep() -> PlanError {
+    PlanError::ExprTooDeep {
+        max: MAX_EXPR_DEPTH,
+    }
+}
+
+fn parse_postfix(p: &mut Parser, depth: usize, mut expr: Expr) -> Result<Expr, PlanError> {
+    let mut extra = 0usize;
     while let Some(Tok::Dot) = p.peek() {
         p.pos += 1;
         let field = match p.bump() {
             Some(Tok::Ident(s)) => s,
             Some(Tok::Int(n)) => n.to_string(),
             other => {
-                return Expr::Field {
+                return Ok(Expr::Field {
                     base: Box::new(expr),
                     field: format!("<invalid {other:?}>"),
-                }
+                })
             }
         };
+        // Each projection adds a level of `Field` to the tree even though this
+        // loop adds no stack. Checked before the node is built so that the
+        // offending chain is rejected at its own depth.
+        if depth + extra + 1 > MAX_EXPR_DEPTH {
+            return Err(too_deep());
+        }
+        extra += 1;
         expr = Expr::Field {
             base: Box::new(expr),
             field,
         };
     }
-    expr
+    Ok(expr)
 }
 
-fn parse_primary(p: &mut Parser) -> Result<Expr, PlanError> {
+fn parse_primary(p: &mut Parser, depth: usize) -> Result<Expr, PlanError> {
     match p.peek().cloned() {
         Some(Tok::Int(n)) => {
             p.pos += 1;
@@ -354,9 +379,11 @@ fn parse_primary(p: &mut Parser) -> Result<Expr, PlanError> {
             p.pos += 1;
             Ok(Expr::Literal(Literal::Str(s)))
         }
+        // The recursion back into `parse_expr` is what a wall of parentheses
+        // drives, so it is the parse that most needs the depth counter.
         Some(Tok::LParen) => {
             p.pos += 1;
-            let e = parse_expr(p)?;
+            let e = parse_expr(p, depth + 1)?;
             p.expect(Tok::RParen)?;
             Ok(e)
         }
@@ -367,7 +394,7 @@ fn parse_primary(p: &mut Parser) -> Result<Expr, PlanError> {
                 "false" => return Ok(Expr::Literal(Literal::Bool(false))),
                 "len" => {
                     p.expect(Tok::LParen)?;
-                    let inner = parse_expr(p)?;
+                    let inner = parse_expr(p, depth + 1)?;
                     p.expect(Tok::RParen)?;
                     return Ok(Expr::Len(Box::new(inner)));
                 }
@@ -380,7 +407,7 @@ fn parse_primary(p: &mut Parser) -> Result<Expr, PlanError> {
                             if kw == "source" {
                                 p.pos += 1;
                                 p.expect(Tok::Eq)?;
-                                source = Some(parse_expr(p)?);
+                                source = Some(parse_expr(p, depth + 1)?);
                             }
                         }
                     }
@@ -406,7 +433,7 @@ fn parse_primary(p: &mut Parser) -> Result<Expr, PlanError> {
                 while !p.eat(&Tok::RParen) {
                     let arg_name = p.ident()?;
                     p.expect(Tok::Eq)?;
-                    let value = parse_expr(p)?;
+                    let value = parse_expr(p, depth + 1)?;
                     args.push(Arg::new(arg_name, value));
                     if !p.eat(&Tok::Comma) {
                         p.expect(Tok::RParen)?;

@@ -1,11 +1,14 @@
-use agentos_types::SourceId;
+use agentos_types::{SourceId, Val};
 
-use crate::data::PlanData;
+use crate::data::{PlanData, PlanValue};
 
 /// A literal in plan source.
 ///
-/// `Quoted` exists so the parser round-trips quarantined text without ever
-/// placing it in a trusted literal. Only the extractor can construct one.
+/// `Quoted` exists so a quarantined value can travel through the plan language
+/// without being mistaken for planner-authored text. The parser has no grammar
+/// for it, so `parse` can never produce one, but `Plan` is a public type that a
+/// host builds programmatically, and a `Quoted` in a hand-built plan is still
+/// text lifted out of a document. See [`Literal::into_value`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Int(i64),
@@ -15,12 +18,28 @@ pub enum Literal {
 }
 
 impl Literal {
-    pub fn into_data(self) -> PlanData {
+    /// The value this literal denotes, with its provenance attached.
+    ///
+    /// There is deliberately no method returning a bare `PlanData`. A bare
+    /// `PlanData` carries no label, so the caller's next move would be
+    /// `Val::trusted(..)`, and the only thing distinguishing planner-authored
+    /// text from attacker text would be which variant the author picked. The
+    /// decision is made here instead, in one place.
+    ///
+    /// `Int`, `Bool` and `Str` are trusted because the planner authored them and
+    /// the planner never observes untrusted bytes (invariant I1). `Quoted` is not
+    /// planner-authored no matter who built the `Plan`, so it arrives carrying
+    /// the taint of the document it came out of. A host that mints a
+    /// `Literal::Quoted` gets a value it must argue about at a sensitive
+    /// position, which is the outcome a hostile document should get.
+    pub fn into_value(self) -> PlanValue {
         match self {
-            Literal::Int(i) => PlanData::Int(i),
-            Literal::Bool(b) => PlanData::Bool(b),
-            Literal::Str(s) => PlanData::Str(s),
-            Literal::Quoted { text, source } => PlanData::quoted(text, source),
+            Literal::Int(i) => Val::trusted(PlanData::Int(i)),
+            Literal::Bool(b) => Val::trusted(PlanData::Bool(b)),
+            Literal::Str(s) => Val::trusted(PlanData::Str(s)),
+            Literal::Quoted { text, source } => {
+                Val::tainted(source, PlanData::quoted(text, source))
+            }
         }
     }
 }
@@ -131,7 +150,7 @@ fn collect_tools_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
 fn validate_stmt(stmt: &Stmt, depth: &mut usize) -> Result<(), PlanError> {
     match stmt {
         Stmt::ForEach { iter, body, .. } => {
-            validate_expr(iter)?;
+            validate_expr(iter, 0)?;
             *depth += 1;
             if *depth > MAX_LOOP_DEPTH {
                 return Err(PlanError::LoopTooDeep { max: MAX_LOOP_DEPTH });
@@ -142,27 +161,58 @@ fn validate_stmt(stmt: &Stmt, depth: &mut usize) -> Result<(), PlanError> {
             *depth -= 1;
             Ok(())
         }
-        Stmt::Let { value, .. } => validate_expr(value),
-        Stmt::Report { value } => validate_expr(value),
+        Stmt::Let { value, .. } => validate_expr(value, 0),
+        Stmt::Report { value } => validate_expr(value, 0),
     }
 }
 
-fn validate_expr(expr: &Expr) -> Result<(), PlanError> {
+/// Structural depth check.
+///
+/// `MAX_LOOP_DEPTH` bounds statement nesting, which is the cheap axis: the
+/// parser builds the body of a block as a flat `Vec`, so nesting loops costs a
+/// caller nothing to express and everything to validate. Expression nesting is
+/// the opposite. `parse_postfix` builds `a.a.a...` iteratively, so a 20,000
+/// segment projection chain parses in constant stack, and then both this
+/// function and [`crate::interp::run`]'s `eval` walk it recursively. Without a
+/// depth limit the deepest legal-looking expression is a stack overflow, which
+/// is an abort rather than a catchable error, so `Limits` cannot help: it is
+/// consulted during `run`, long after this recursion has already run.
+///
+/// `validate` is also the only gate on a `Plan` built programmatically, since
+/// `run` calls it before executing anything.
+fn validate_expr(expr: &Expr, depth: usize) -> Result<(), PlanError> {
+    if depth > MAX_EXPR_DEPTH {
+        return Err(PlanError::ExprTooDeep {
+            max: MAX_EXPR_DEPTH,
+        });
+    }
     match expr {
-        Expr::ToolCall { args, .. } => args.iter().try_for_each(|a| validate_expr(&a.value)),
-        Expr::Field { base, .. } => validate_expr(base),
-        Expr::Extract { source, .. } => validate_expr(source),
-        Expr::Len(inner) => validate_expr(inner),
+        Expr::ToolCall { args, .. } => args
+            .iter()
+            .try_for_each(|a| validate_expr(&a.value, depth + 1)),
+        Expr::Field { base, .. } => validate_expr(base, depth + 1),
+        Expr::Extract { source, .. } => validate_expr(source, depth + 1),
+        Expr::Len(inner) => validate_expr(inner, depth + 1),
         Expr::Literal(_) | Expr::Var(_) => Ok(()),
     }
 }
 
 pub const MAX_LOOP_DEPTH: usize = 8;
 
+/// Maximum expression nesting depth.
+///
+/// Bounds the three recursions driven purely by input length: the parser's
+/// `LParen` arm, `validate_expr`, and `eval`. 64 is far above anything a
+/// readable plan needs (a four-deep projection is typical) and far below the
+/// ~10k frames that overflow a default thread stack.
+pub const MAX_EXPR_DEPTH: usize = 64;
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum PlanError {
     #[error("loop nesting exceeds maximum depth {max}")]
     LoopTooDeep { max: usize },
+    #[error("expression nesting exceeds maximum depth {max}")]
+    ExprTooDeep { max: usize },
     #[error("parse error at line {line}: {message}")]
     Parse { line: u32, message: String },
     #[error("undefined variable `{0}`")]
@@ -215,6 +265,74 @@ mod tests {
                 max: MAX_LOOP_DEPTH
             })
         );
+    }
+
+    #[test]
+    fn deeply_nested_field_chains_are_rejected_by_validate() {
+        // `MAX_LOOP_DEPTH` does not help here: this is one statement, and the
+        // depth is driven entirely by the tree the caller handed in.
+        //
+        // Past the limit but nowhere near a stack overflow. `Expr` nests through
+        // `Box`, so dropping this tree is itself a recursive walk; `validate`
+        // refusing it is not on its own enough to make an absurd tree safe to
+        // build.
+        let mut expr = Expr::Var("a".into());
+        for _ in 0..512 {
+            expr = Expr::Field {
+                base: Box::new(expr),
+                field: "b".into(),
+            };
+        }
+        let plan = Plan {
+            stmts: vec![Stmt::Report {
+                value: Box::new(expr),
+            }],
+        };
+        assert_eq!(
+            plan.validate(),
+            Err(PlanError::ExprTooDeep {
+                max: MAX_EXPR_DEPTH
+            })
+        );
+    }
+
+    #[test]
+    fn deeply_nested_tool_arguments_are_rejected_by_validate() {
+        let mut expr = Expr::Literal(Literal::Int(1));
+        for _ in 0..512 {
+            expr = Expr::Len(Box::new(expr));
+        }
+        let plan = Plan {
+            stmts: vec![Stmt::Let {
+                name: "x".into(),
+                value: expr,
+            }],
+        };
+        assert_eq!(
+            plan.validate(),
+            Err(PlanError::ExprTooDeep {
+                max: MAX_EXPR_DEPTH
+            })
+        );
+    }
+
+    #[test]
+    fn ordinary_expression_depth_passes() {
+        let plan = Plan {
+            stmts: vec![Stmt::Report {
+                value: Box::new(Expr::Len(Box::new(Expr::Field {
+                    base: Box::new(Expr::Field {
+                        base: Box::new(Expr::Extract {
+                            source: Box::new(Expr::Var("page".into())),
+                            schema: "Invoice".into(),
+                        }),
+                        field: "0".into(),
+                    }),
+                    field: "total".into(),
+                }))),
+            }],
+        };
+        assert!(plan.validate().is_ok());
     }
 
     #[test]

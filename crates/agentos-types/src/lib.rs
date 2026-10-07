@@ -5,6 +5,7 @@
 //! tainted value into a [`Trusted<T>`] requires an explicit disclosure.
 
 mod capability;
+mod digest;
 mod event;
 mod provenance;
 mod value;
@@ -12,7 +13,10 @@ mod value;
 pub use capability::{Cap, CapId, CapKind, CapRegistry};
 pub use event::{Event, EventId};
 pub use provenance::{Label, SourceId, SourceKind};
-pub use value::{ControllerAuthority, Quarantined, Trusted, Val};
+pub use value::{
+    Approval, Confirmation, ConfirmationError, ControllerAuthority, Origin, Quarantined,
+    TaintError, Trusted, Val,
+};
 
 /// A value produced by the trusted user, never by an untrusted source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]

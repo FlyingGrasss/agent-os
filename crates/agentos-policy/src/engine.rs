@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use agentos_types::Val;
+use agentos_types::{SourceKind, Val};
 use serde::{Deserialize, Serialize};
 
 use crate::rule::{Rule, RuleSet};
@@ -39,6 +39,12 @@ pub struct ConfirmationItem {
     pub arg: String,
     pub value: String,
     /// Rendered for display: the source kinds that influenced this value.
+    ///
+    /// Deduplicated, so a value influenced by three web pages lists "web page"
+    /// once. Never empty for a tainted value: an origin that could not be
+    /// classified still reports as `SourceKind::Unattributed`, because a user
+    /// must not be shown an empty provenance list and left to assume the value
+    /// came from nowhere.
     pub provenance: Vec<String>,
 }
 
@@ -105,11 +111,16 @@ impl PolicyEngine {
             match self.rules.lookup(tool, arg) {
                 Rule::Allow => continue,
                 Rule::Confirm => {
+                    // Render what the user is actually deciding about: which
+                    // kinds of untrusted source produced this value. A list of
+                    // N copies of the same placeholder told the user nothing and
+                    // gave the audit log nothing to record.
                     let provenance = value
                         .label()
-                        .sources()
-                        .iter()
-                        .map(|_| "untrusted source".to_string())
+                        .source_kinds()
+                        .into_iter()
+                        .map(SourceKind::as_str)
+                        .map(str::to_string)
                         .collect();
                     items.push(ConfirmationItem {
                         arg: arg.clone(),
@@ -168,6 +179,17 @@ fn host_of(url: &str) -> Option<String> {
     if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphanumeric()) {
         return None;
     }
+    // The charset check above is not a statement about *which* scheme this is:
+    // `file`, `ftp`, `gopher` and `javascript` all satisfy it. This gate exists
+    // to decide whether a fetch happens at all, so anything that is not an HTTP
+    // or HTTPS fetch must fail here rather than reach the allowlist comparison
+    // on the strength of a matching host. Refusing is the safe direction: a
+    // scheme the runtime cannot reason about is a scheme whose handling is
+    // somebody else's decision, and this allowlist is not written down as
+    // authorising that.
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
     let authority = rest.split(['/', '?', '#']).next()?;
     // Reject a backslash outright. Browsers treat `\` as a path separator, so
     // `https://evil.test\@good.test/` really targets evil.test, while
@@ -197,8 +219,10 @@ fn host_of(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_types::SourceId;
+    use agentos_types::{Label, SourceId};
 
+    /// A tainted value whose source was never classified, so its label reports
+    /// `SourceKind::Unattributed`.
     fn tainted(s: &str) -> Val<String> {
         Val::tainted(SourceId::new(), s.to_string())
     }
@@ -330,6 +354,162 @@ mod tests {
         assert_eq!(host_of("https://"), None);
         assert_eq!(host_of("https://good test/x"), None);
         assert_eq!(host_of("https://evil.test\\@good.test/x"), None);
+    }
+
+    // --- Non-HTTP schemes must not satisfy the allowlist. ---
+
+    #[test]
+    fn non_http_scheme_does_not_reach_the_allowlist() {
+        let mut engine = PolicyEngine::new(PolicyEngine::default_rules());
+        engine.allow_domain("good.test");
+        for attack in [
+            "file://good.test/etc/passwd",
+            "ftp://good.test/",
+            "gopher://good.test/",
+            "javascript://good.test/",
+            "data://good.test/",
+            // Charset-legal, value-illegal: the previous check only looked at
+            // the character set, so anything alphanumeric matched.
+            "HTTP2://good.test/",
+            "ws://good.test/",
+        ] {
+            let d = engine.evaluate("http.get", &args(&[("url", tainted(attack))]));
+            assert!(
+                matches!(d, Decision::Deny { .. }),
+                "non-HTTP scheme {attack} must not be allowed for an \
+                 allowlisted host, got {d:?}"
+            );
+            assert_eq!(host_of(attack), None, "{attack} must not parse as a host");
+        }
+    }
+
+    #[test]
+    fn http_scheme_is_still_allowed_case_insensitively() {
+        let mut engine = PolicyEngine::new(PolicyEngine::default_rules());
+        engine.allow_domain("good.test");
+        for url in ["http://good.test/x", "https://good.test/x"] {
+            assert_eq!(engine.evaluate("http.get", &args(&[("url", tainted(url))])), Decision::Allow);
+        }
+        // The scheme comparison must not accidentally be case-sensitive.
+        for url in ["HTTP://good.test/x", "HtTpS://good.test/x"] {
+            assert_eq!(
+                engine.evaluate("http.get", &args(&[("url", tainted(url))])),
+                Decision::Allow,
+                "{url} is an HTTP fetch and should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn scheme_check_did_not_loosen_the_existing_host_rejections() {
+        // The scheme gate is an addition, not a replacement: every case the
+        // parser used to reject must still be rejected.
+        assert_eq!(host_of("not a url"), None);
+        assert_eq!(host_of("good.test/x"), None);
+        assert_eq!(host_of("://good.test"), None);
+        assert_eq!(host_of(""), None);
+        assert_eq!(host_of("https://"), None);
+        assert_eq!(host_of("https://good test/x"), None);
+        assert_eq!(host_of("https://evil.test\\@good.test/x"), None);
+        assert_eq!(host_of("https://good.test@evil.test/x"), Some("evil.test".into()));
+        // Trailing dot: still denied, still safe, deliberately unchanged.
+        assert_eq!(host_of("https://good.test./"), None);
+    }
+
+    // --- The confirmation prompt must say where the value came from. ---
+
+    #[test]
+    fn confirmation_names_the_kind_of_source_not_a_placeholder() {
+        let val = Val::labeled(
+            "evil@example.com".to_string(),
+            Label::from_source(SourceId::new(), SourceKind::Email),
+        );
+        let engine = PolicyEngine::new(PolicyEngine::default_rules());
+        let d = engine.evaluate("send_email", &args(&[("to", val)]));
+        match d {
+            Decision::Confirm { request } => {
+                assert_eq!(
+                    request.items[0].provenance,
+                    vec![SourceKind::Email.as_str().to_string()]
+                );
+                assert!(
+                    !request.items[0].provenance.iter().any(|p| p == "untrusted source"),
+                    "the repeated placeholder must be gone"
+                );
+            }
+            other => panic!("expected confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirmation_lists_every_kind_that_influenced_the_value() {
+        let page = SourceId::of_kind(SourceKind::WebPage);
+        let mail = SourceId::of_kind(SourceKind::Email);
+        let label = Label::from_source(page, SourceKind::WebPage)
+            .join(&Label::from_source(mail, SourceKind::Email));
+
+        let engine = PolicyEngine::new(PolicyEngine::default_rules());
+        let d = engine.evaluate(
+            "send_email",
+            &args(&[("to", Val::labeled("a@b.c".to_string(), label))]),
+        );
+        match d {
+            Decision::Confirm { request } => {
+                let mut got = request.items[0].provenance.clone();
+                got.sort();
+                let mut want = vec![
+                    SourceKind::WebPage.as_str().to_string(),
+                    SourceKind::Email.as_str().to_string(),
+                ];
+                want.sort();
+                assert_eq!(got, want);
+            }
+            other => panic!("expected confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeated_sources_of_one_kind_are_listed_once() {
+        // Three web pages is one fact for the user: "a web page". Three copies
+        // would suggest three independent findings.
+        let label = Label::tainted(SourceId::of_kind(SourceKind::WebPage))
+            .join(&Label::tainted(SourceId::of_kind(SourceKind::WebPage)))
+            .join(&Label::tainted(SourceId::of_kind(SourceKind::WebPage)));
+        let engine = PolicyEngine::new(PolicyEngine::default_rules());
+        let d = engine.evaluate(
+            "send_email",
+            &args(&[("to", Val::labeled("a@b.c".to_string(), label))]),
+        );
+        match d {
+            Decision::Confirm { request } => {
+                assert_eq!(
+                    request.items[0].provenance,
+                    vec![SourceKind::WebPage.as_str().to_string()]
+                );
+            }
+            other => panic!("expected confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tainted_value_with_no_classified_source_still_shows_provenance() {
+        // Failing to name the origin is not the same as having no origin. An
+        // empty list here would read to a user as "nothing untrusted here".
+        let engine = PolicyEngine::new(PolicyEngine::default_rules());
+        let d = engine.evaluate(
+            "send_email",
+            &args(&[("to", tainted("evil@example.com"))]),
+        );
+        match d {
+            Decision::Confirm { request } => {
+                assert_eq!(
+                    request.items[0].provenance,
+                    vec![SourceKind::Unattributed.as_str().to_string()]
+                );
+                assert!(!request.items[0].provenance.is_empty());
+            }
+            other => panic!("expected confirmation, got {other:?}"),
+        }
     }
 
     #[test]

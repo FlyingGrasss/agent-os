@@ -1,5 +1,3 @@
-use std::fmt;
-
 use agentos_types::{Label, SourceId, Val};
 
 /// A value the plan language can manipulate.
@@ -8,6 +6,20 @@ use agentos_types::{Label, SourceId, Val};
 /// rather than tracked alongside it. Note that `Str` exists here: the DSL must
 /// be able to carry strings, but the policy engine is what decides whether a
 /// given string may reach a sensitive argument, not the type system.
+///
+/// There is deliberately no `impl Display for PlanData`. It used to render
+/// `self.to_json()`, and `to_json` renders `Quoted` as a bare JSON string, so
+/// the attacker's bytes came out with no quoting, no provenance, and no source
+/// id: indistinguishable from a planner-authored `Str` in the output. That
+/// matters because `Display` is what an error message, a log line, or a TUI row
+/// reaches for by default. `PlanData` carries no label of its own, so no method
+/// on it can render honestly; the supported path is
+/// `Val::with_label_for_display`, which forces the label into the rendering.
+///
+/// ```compile_fail
+/// // There is no label-free rendering of `PlanData` to reach for by accident.
+/// let text = format!("{}", agentos_dsl::PlanData::Int(1));
+/// ```
 #[derive(Debug, Clone)]
 pub enum PlanData {
     Unit,
@@ -52,6 +64,11 @@ impl PlanData {
     }
 
     /// Render as JSON for a tool argument, preserving quoting.
+    ///
+    /// Label-free, by construction: `PlanData` does not hold one. The output
+    /// renders `Quoted` and `Str` identically, so this must only be used where
+    /// the value's provenance is already established and recorded elsewhere.
+    /// It is not a renderer.
     pub fn to_json(&self) -> serde_json::Value {
         match self {
             PlanData::Unit => serde_json::Value::Null,
@@ -129,10 +146,4 @@ pub fn plan_trusted(data: PlanData) -> PlanValue {
 #[allow(dead_code)]
 pub fn label_of(v: &PlanValue) -> &Label {
     v.label()
-}
-
-impl fmt::Display for PlanData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_json())
-    }
 }

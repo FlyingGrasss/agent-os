@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
-use agentos_types::{Event, Label, SourceId, Trusted, Val};
+use agentos_types::{Event, SourceId, Val};
 
-use crate::ast::{Expr, PlanError, Plan, Stmt};
+use crate::ast::{Expr, PlanError, Plan, Stmt, MAX_EXPR_DEPTH};
 use crate::data::{PlanData, PlanValue};
 
 /// Tools the interpreter may call. Implemented by the broker, not by the plan.
@@ -106,21 +106,20 @@ impl<'a> Interp<'a> {
         st.step(&self.limits)?;
         match stmt {
             Stmt::Let { name, value } => {
-                let v = self.eval(value, st)?;
+                let v = self.eval(value, st, 0)?;
                 if st.vars.insert(name.clone(), v).is_some() {
                     return Err(PlanError::DuplicateBinding { name: name.clone() });
                 }
                 Ok(())
             }
             Stmt::Report { value } => {
-                let v = self.eval(value, st)?;
+                let v = self.eval(value, st, 0)?;
                 let summary = v
                     .with_label_for_display(|data, label| match data {
                         PlanData::Int(n) => Some(format!("{n}")),
                         PlanData::Bool(b) => Some(format!("{b}")),
-                        // An enum's values are fixed by the schema, so a tainted
-                        // enum still cannot carry an attacker's prose.
-                        PlanData::Enum(e) => Some(e.clone()),
+                        // A count is structure, not prose: an attacker controls
+                        // how many invoices they send, not what the user reads.
                         PlanData::List(items) => Some(format!("{} item(s)", items.len())),
                         PlanData::Unit => Some("done".to_string()),
                         // Text is allowed only when the label says the planner
@@ -128,14 +127,52 @@ impl<'a> Interp<'a> {
                         // inherits that document's taint, so this admits
                         // planner-authored prose and nothing else.
                         PlanData::Str(s) if label.is_trusted() => Some(s.clone()),
-                        PlanData::Str(_) | PlanData::Quoted { .. } | PlanData::Record(_) => None,
+                        // `Enum` is refused here, and the label is not consulted
+                        // for it at all, which needs justifying because `Enum` is
+                        // supposed to be a closed set.
+                        //
+                        // `PlanData::Enum` is a bare `String` and nothing in the
+                        // workspace constrains which strings may appear in one:
+                        // there is no schema registry, `Expr::Extract` forwards
+                        // the schema name to the extractor and trusts whatever
+                        // comes back, and the only producer of
+                        // `PlanError::UnknownSchema` is a test double. So an
+                        // extractor's failure to validate an enum field is
+                        // indistinguishable, from here, from an enum field
+                        // holding the attacker's prose verbatim, and an earlier
+                        // version of this arm assumed the validation happened.
+                        // This is the last line of defence, so it cannot rest on
+                        // the extractor behaving correctly.
+                        //
+                        // Refusing a *trusted* enum too is deliberate: without a
+                        // schema registry the interpreter cannot tell a
+                        // validated enum from a raw string, so admitting the
+                        // trusted case would reintroduce the same hole for any
+                        // caller that mints one. When a registry exists this arm
+                        // can be reopened for labels it vouches for.
+                        PlanData::Str(_)
+                        | PlanData::Quoted { .. }
+                        | PlanData::Enum(_)
+                        | PlanData::Record(_) => None,
                     })
                     .ok_or(PlanError::TaintedReport)?;
                 self.reports.push(Report { summary });
                 Ok(())
             }
             Stmt::ForEach { var, iter, body } => {
-                let list = self.eval(iter, st)?;
+                let list = self.eval(iter, st, 0)?;
+                // Checked before the loop rather than at the point of binding,
+                // so an empty or absent iteration still fails: the plan is
+                // ambiguous either way, and an error that depends on the data
+                // is an error nobody tests.
+                //
+                // Without this the arm would insert `var`, shadow any outer
+                // binding of the same name, and then delete it, so a plan that
+                // reads `a` after the loop would see the variable vanish rather
+                // than see its own mistake.
+                if st.vars.contains_key(var) {
+                    return Err(PlanError::DuplicateBinding { name: var.clone() });
+                }
                 let items = match list.with_label_for_display(|d, _| d.as_list().map(|i| i.to_vec())) {
                     Some(items) => items,
                     None => {
@@ -167,17 +204,32 @@ impl<'a> Interp<'a> {
         }
     }
 
-    fn eval(&mut self, expr: &Expr, st: &mut State) -> Result<PlanValue, PlanError> {
+    /// Evaluate an expression.
+    ///
+    /// `depth` counts enclosing sub-expressions and is checked on the way in,
+    /// mirroring `validate_expr`. `run` validates before it executes anything,
+    /// so in practice this counter never trips; it is here because `eval` is a
+    /// recursive walk of a tree whose depth is attacker-influenced, and the
+    /// recursion budget belongs with the code that spends it rather than
+    /// depending on a distant caller having checked first. The limit also makes
+    /// this function's stack usage bounded by construction, which a caller that
+    /// forgot to validate could not otherwise guarantee.
+    fn eval(&mut self, expr: &Expr, st: &mut State, depth: usize) -> Result<PlanValue, PlanError> {
+        if depth > MAX_EXPR_DEPTH {
+            return Err(PlanError::ExprTooDeep {
+                max: MAX_EXPR_DEPTH,
+            });
+        }
         st.step(&self.limits)?;
         match expr {
-            Expr::Literal(l) => Ok(Val::trusted(l.clone().into_data())),
+            Expr::Literal(l) => Ok(l.clone().into_value()),
             Expr::Var(name) => st
                 .vars
                 .get(name)
                 .cloned()
                 .ok_or_else(|| PlanError::UndefinedVar(name.clone())),
             Expr::Len(inner) => {
-                let v = self.eval(inner, st)?;
+                let v = self.eval(inner, st, depth + 1)?;
                 let n = match v.with_label_for_display(|d, _| d.as_list().map(|l| l.len())) {
                     Some(n) => n as i64,
                     None => {
@@ -193,7 +245,7 @@ impl<'a> Interp<'a> {
                 Ok(Val::labeled(PlanData::Int(n), v.label().clone()))
             }
             Expr::Field { base, field } => {
-                let v = self.eval(base, st)?;
+                let v = self.eval(base, st, depth + 1)?;
                 let projected =
                     match v.with_label_for_display(|d, _| (d.type_name(), d.get(field).cloned())) {
                         (_, Some(f)) => f,
@@ -207,7 +259,7 @@ impl<'a> Interp<'a> {
                 Ok(Val::labeled(projected, v.label().clone()))
             }
             Expr::Extract { source, schema } => {
-                let doc = self.eval(source, st)?;
+                let doc = self.eval(source, st, depth + 1)?;
                 // The extractor is handed the document as opaque data. Whatever
                 // it returns is trusted as a *structure* but inherits the
                 // document's taint, so a field the extractor lifted out of a
@@ -219,7 +271,7 @@ impl<'a> Interp<'a> {
             Expr::ToolCall { tool, args } => {
                 let mut map = BTreeMap::new();
                 for a in args {
-                    map.insert(a.name.clone(), self.eval(&a.value, st)?);
+                    map.insert(a.name.clone(), self.eval(&a.value, st, depth + 1)?);
                 }
                 let result = self.tools.call(tool, &map)?;
                 self.events.push(Event::ToolCompleted {
@@ -234,23 +286,20 @@ impl<'a> Interp<'a> {
     }
 }
 
-/// Helper for hosts: confirm a value with the user, then mark it trusted.
+/// NOTE: the previous `after_confirmation(val, reason)` helper is gone.
 ///
-/// Part of the confirmation path that `agentos-core` drives when the policy
-/// engine returns `Decision::Confirm`. Unused until that crate exists.
-#[allow(dead_code)]
-pub fn after_confirmation(val: Val<PlanData>, reason: &str) -> Result<Trusted<PlanData>, PlanError> {
-    match val.label() {
-        Label::Tainted { .. } => Ok(Trusted::confirmed(val)),
-        Label::Trusted => Err(PlanError::ConfirmationRequired {
-            op: reason.to_string(),
-        }),
-    }
-}
-
+/// It was a public function whose body was "if tainted, mint `Trusted`", with
+/// the confirmation asserted in its name and checked nowhere: anyone holding a
+/// tainted `PlanData` could call it and get a prompt-eligible value. Promotion
+/// now goes through `agentos_types::Trusted::confirmed`, which requires a
+/// `Confirmation` that only the prompt layer can mint, so a helper here cannot
+/// honour the signature change and must not exist. `PlanData` will also need a
+/// `Serialize` impl before it can be confirmed, since a disclosure decision is
+/// made over the value's canonical encoding.
+///
 /// The first recorded source of a tainted value, for display in a confirmation
 /// prompt. Unused until `agentos-core` drives confirmations.
 #[allow(dead_code)]
 pub fn source_of(val: &PlanValue) -> Option<SourceId> {
-    val.label().sources().first().copied().copied()
+    val.label().sources().into_iter().next().copied()
 }
