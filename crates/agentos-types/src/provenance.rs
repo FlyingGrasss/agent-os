@@ -120,13 +120,17 @@ impl SourceKind {
 /// tainted, and labels accumulate rather than overwrite: combining two tainted
 /// values yields a label carrying both sources, so the union of all origins is
 /// always recoverable for auditing and confirmation prompts.
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Label {
-    /// The `Default` is `Trusted`, which is the correct starting point for a
-    /// value the planner authored and the worst starting point for an
-    /// untrusted one. Code constructing `Label` from untrusted input must call
-    /// `Label::tainted` explicitly rather than relying on `default()`.
-    #[default]
+    /// No `Default` derive, deliberately.
+    ///
+    /// `Label::default() == Trusted` is the right answer for a value the planner
+    /// authored and the wrong answer for an untrusted one, and an ingest path that
+    /// forgets to label something would have silently produced trust. Removing
+    /// the impl makes that a compile error at every call site, so the choice has
+    /// to be written down rather than remembered. Construct a label
+    /// explicitly: [`Label::Trusted`] for planner output, [`Label::tainted`] or
+    /// [`Label::from_source`] for everything else.
     Trusted,
     Tainted {
         sources: BTreeSet<SourceId>,
