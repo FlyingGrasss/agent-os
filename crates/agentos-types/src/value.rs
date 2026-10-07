@@ -247,6 +247,17 @@ impl<T: fmt::Debug> fmt::Debug for Trusted<T> {
     }
 }
 
+/// Equality includes the approval and origin, so two `Trusted` values can be
+/// distinguished by who vouched for them. That distinction is what the audit log
+/// reports, so it must not be erased by a comparison.
+impl<T: PartialEq> PartialEq for Trusted<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.approval == other.approval && self.origin == other.origin && self.inner == other.inner
+    }
+}
+
+impl<T: Eq> Eq for Trusted<T> {}
+
 impl<T: Clone> Clone for Trusted<T> {
     fn clone(&self) -> Self {
         Self {
@@ -386,6 +397,19 @@ impl<T: Clone> Clone for Val<T> {
     }
 }
 
+/// Equality includes the label.
+///
+/// A tainted `5` is not equal to a trusted `5`. Comparing only the payload would
+/// make a forged label invisible to any test asserting on equality, which is the
+/// class of bug this type exists to make loud.
+impl<T: PartialEq> PartialEq for Val<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.label == other.label && self.inner == other.inner
+    }
+}
+
+impl<T: Eq> Eq for Val<T> {}
+
 impl<T: fmt::Debug> fmt::Debug for Val<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Val")
@@ -423,6 +447,7 @@ pub struct TaintError {
 /// text is therefore not readable by the Controller at all. It can be shown to
 /// the user, or explicitly confirmed into a `Trusted<String>`, which is the only
 /// way its bytes reach a prompt.
+#[derive(Clone, PartialEq)]
 pub struct Quarantined<T> {
     inner: T,
     label: Label,

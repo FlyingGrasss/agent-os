@@ -8,4 +8,10 @@ license.workspace = true
 [dependencies]
 agentos-types = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+# Only the tests need deterministic user ids. The crate itself takes them from
+# the session.
+[dev-dependencies]
+uuid = { workspace = true }
