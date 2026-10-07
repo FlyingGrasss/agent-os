@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agentos-types",
+    "crates/agentos-dsl",
+    "crates/agentos-policy",
+    "crates/agentos-core",
+    "crates/agentos-infer",
+    "crates/agentos-pager",
+    "crates/agentos-sandbox",
+    "crates/agentos-tools",
+    "crates/agentos-events",
+    "crates/agentos-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+agentos-types = { path = "crates/agentos-types" }
+agentos-dsl = { path = "crates/agentos-dsl" }
+agentos-policy = { path = "crates/agentos-policy" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+schemars = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
