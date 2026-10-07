@@ -14,6 +14,11 @@
 
 use agentos_types::{Quarantined, SourceId, Trusted, Val};
 
+/// The I1 proof obligation: no untrusted value reaches a prompt.
+pub mod leak;
+
+pub use leak::{LeakReport, PromptSlot};
+
 /// Which model role is being invoked.
 ///
 /// Not a default and not an option: a caller has to say which one it means.
