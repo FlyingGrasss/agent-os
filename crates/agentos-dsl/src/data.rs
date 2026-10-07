@@ -20,7 +20,14 @@ use agentos_types::{Label, SourceId, Val};
 /// // There is no label-free rendering of `PlanData` to reach for by accident.
 /// let text = format!("{}", agentos_dsl::PlanData::Int(1));
 /// ```
-#[derive(Debug, Clone)]
+/// The data type the plan language manipulates.
+///
+/// `Serialize` is required because a user confirmation is a claim about a
+/// specific value, and that claim is verified against the value's canonical
+/// encoding. A value that cannot be encoded cannot be shown to a user
+/// coherently either, so refusing to let it be confirmed is correct rather than
+/// an inconvenience.
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum PlanData {
     Unit,
     Bool(bool),

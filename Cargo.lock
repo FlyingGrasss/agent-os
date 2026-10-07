@@ -17,9 +17,12 @@ version = "0.1.0"
 dependencies = [
  "agentos-dsl",
  "agentos-policy",
+ "agentos-tools",
  "agentos-types",
  "serde",
+ "serde_json",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

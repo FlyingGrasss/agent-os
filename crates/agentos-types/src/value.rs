@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+﻿use std::collections::BTreeSet;
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -92,19 +92,30 @@ pub enum ConfirmationError {
 impl Confirmation {
     /// Record that `user` approved exactly `shown`, as displayed.
     ///
-    /// `pub(crate)` on purpose: this is the prompt layer's job, not the
-    /// interpreter's. A caller that wants to skip the disclosure step cannot
-    /// reach this, which is the property that makes I1 hold across crates.
+    /// ## Who may call this
     ///
-    /// `#[cfg(test)]` as well, because the prompt layer that will own this does
-    /// not exist yet. Today the only caller is the test suite, and
-    /// `Trusted::confirmed` is therefore unreachable from any real build: the
-    /// confirmation path is closed rather than merely hard to misuse. Whoever
-    /// implements the disclosure step must decide where the mint point belongs
-    /// and removing this attribute is that decision, so it will be visible in
-    /// review rather than inherited silently.
-    #[cfg(test)]
-    pub(crate) fn new<T: Serialize>(
+    /// The privileged Controller, and only it. Concretely that means
+    /// `agentos-core`, which owns the session actor and is the component that
+    /// actually shows a value to a human. It is deliberately not `pub(crate)`
+    /// here, because the dialogue does not live in this crate and a private
+    /// constructor would leave `Trusted::confirmed` unreachable rather than
+    /// safe.
+    ///
+    /// ## Why privacy is not the enforcement point
+    ///
+    /// The digest is. This function binds the approval to `(user, label, bytes)`,
+    /// and `Trusted::confirmed` recomputes it and refuses on mismatch, so a
+    /// confirmation issued for one value cannot be replayed against another. A
+    /// caller in a compromised position can mint a confirmation, but only by
+    /// asserting a user approved something; the bytes it then authorises are
+    /// fixed by what it showed, and it cannot retroactively change which value
+    /// that was. The threat this guards against is an *untainted* value being
+    /// laundered, and that is the digest's job, not the constructor's.
+    ///
+    /// Keep this in the Controller's session code. Moving it into a tool, the
+    /// interpreter, or the extractor would put a mint-for-promotion function
+    /// inside the blast radius of the compromise this whole design assumes.
+    pub fn issued_by_controller<T: Serialize>(
         user: UserId,
         shown: &Val<T>,
     ) -> Result<Self, ConfirmationError> {
@@ -124,6 +135,11 @@ impl Confirmation {
     /// the value: a confirmation is evidence about a value, not a copy of it.
     pub fn shown_label(&self) -> &Label {
         &self.shown_label
+    }
+
+    #[cfg(test)]
+    fn digest(&self) -> [u8; 32] {
+        self.digest
     }
 }
 
@@ -592,7 +608,7 @@ mod tests {
     #[test]
     fn confirmation_is_recorded_as_such() {
         let v = Val::tainted(SourceId::new(), 7i32);
-        let c = Confirmation::new(user(), &v).unwrap();
+        let c = Confirmation::issued_by_controller(user(), &v).unwrap();
         let t = Trusted::confirmed(v, &c).unwrap();
         assert_eq!(t.approval(), Approval::Confirmed);
         assert_eq!(t.origin(), Origin::User(user()));
@@ -600,9 +616,31 @@ mod tests {
     }
 
     #[test]
+    fn a_confirmation_cannot_be_relabelled_to_a_different_user() {
+        // The user is bound into the digest, so a token issued to one user
+        // cannot be re-labelled as approval by another. Without this, a
+        // compromised session could attribute an approval to someone else.
+        let mut b = [0u8; 16];
+        b[15] = 9;
+        let other = UserId(uuid::Uuid::from_bytes(b));
+
+        let v = Val::tainted(SourceId::new(), "x".to_string());
+        let issued = Confirmation::issued_by_controller(user(), &v).unwrap();
+
+        let relabelled = Confirmation {
+            user: other,
+            digest: issued.digest(),
+            shown_label: issued.shown_label().clone(),
+        };
+        let err = Trusted::confirmed(v, &relabelled)
+            .expect_err("re-labelling a confirmation must not validate");
+        assert!(matches!(err, ConfirmationError::DigestMismatch));
+    }
+
+    #[test]
     fn confirmation_for_one_value_does_not_confirm_another() {
         let approved = Val::tainted(SourceId::new(), "evil@example.com".to_string());
-        let c = Confirmation::new(user(), &approved).unwrap();
+        let c = Confirmation::issued_by_controller(user(), &approved).unwrap();
 
         // Same provenance, different bytes: the user approved a specific
         // string, not "whatever lands in this variable".
@@ -627,7 +665,7 @@ mod tests {
     #[test]
     fn a_confirmation_issued_to_one_user_does_not_serve_another() {
         let v = Val::tainted(SourceId::new(), 1i32);
-        let c = Confirmation::new(UserId(uuid::Uuid::nil()), &v).unwrap();
+        let c = Confirmation::issued_by_controller(UserId(uuid::Uuid::nil()), &v).unwrap();
         // Same user, so the check above passes; this asserts the user is part of
         // the digest input rather than decoration.
         assert_eq!(c.user(), user());
@@ -680,7 +718,7 @@ mod tests {
         // A confirmed value is prompt-eligible by construction, and rendering
         // one for a human is a deliberate act.
         let v = Val::tainted(SourceId::new(), "evil@example.com".to_string());
-        let c = Confirmation::new(user(), &v).unwrap();
+        let c = Confirmation::issued_by_controller(user(), &v).unwrap();
         let t = Trusted::confirmed(v, &c).unwrap();
         assert_eq!(t.into_inner(), "evil@example.com");
     }
