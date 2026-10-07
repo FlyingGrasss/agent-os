@@ -16,7 +16,7 @@ Last updated after commit `e8164cc`.
 | I2 | Extractor has no tools, network, or filesystem | **Not started** | `agentos-infer` is a placeholder; `Extractor` is a bare trait with no capability argument. |
 | I3 | Labels propagate through all operations | **Done** | `Val::map`/`zip`/`map_with_label`, interpreter's field/len/extract/iteration. 20,000-deep ASTs refused rather than overflowing the stack. |
 | I4 | Sensitive args reject tainted unless confirmed | **Done, one loop open** | `PolicyHost` resolves → evaluates → audits → acts only on `Allow`. The confirmation *round trip* is not built yet: requests are queued, nothing consumes them. |
-| I5 | Process sees only granted fds | **Not started** | `agentos-sandbox` is a placeholder. `Cap<K>` exists with sealed marker types so handle confusion is a compile error. |
+| I5 | Process sees only granted fds | **Partial** | Landlock confines the filesystem; seccomp refuses `socket(2)`, UDP, and Unix sockets. `Cap<K>` exists with sealed marker types. **Not built:** cgroup limits, namespaces, `SCM_RIGHTS` fd passing, worker pool. |
 | I6 | Audit log, append-only, before execution | **Done** | `AuditLog::record_intent` returns an `AttemptToken` with private fields, so an effect cannot be performed without a prior durable record. |
 
 ---
@@ -47,18 +47,20 @@ Last updated after commit `e8164cc`.
 ## Phase 2 — Process confinement
 
 - [x] Kernel capability verified, not assumed. Landlock is compiled in, ABI 7, and was confirmed by *building a ruleset and escaping it* — `/etc/passwd`, `/proc/self/mem`, `/sys/kernel/security`, and a symlink out all denied.
-- [x] seccomp confirmed enforcing (real BPF allowlist installed, child died on disallowed syscalls).
+- [x] seccomp confirmed enforcing (`CONFIG_SECCOMP_FILTER=y`; a real BPF allowlist installed and a child refused disallowed syscalls).
 - [x] BTF present for eBPF type resolution.
-- [ ] Landlock wrapper in `agentos-sandbox`. No code written.
-- [ ] seccomp allowlist per tool class.
-- [ ] `PR_SET_NO_NEW_PRIVS` in every confined child. Confirmed it defaults to `0`, so this is required, not optional.
+- [x] Landlock wrapper in `agentos-sandbox`: `Confine`, typed grants, `Enforced` proof token. 51 escape probes observed, each with a positive control.
+- [x] seccomp allowlist per tool class (`Filesystem`, `Exec`), default deny, ENOSYS on refusal so a tool fails visibly rather than dying silently.
+- [x] `PR_SET_NO_NEW_PRIVS` in every confined child. Confirmed it defaults to `0`, so this is required, not optional. Both Landlock and seccomp refuse without it.
+- [x] Landlock ABI-version fallback matrix, fail closed. Requires ABI V6 to confine anything.
+- [x] `socket(2)` and UDP refused under seccomp, closing the hole Landlock leaves. Unix sockets also refused.
 - [ ] Pre-forked, pre-confined worker pool (target: ~5 ms warm, ~30 ms cold).
 - [ ] cgroups v2 limits. **Blocked:** root-owned, no delegation for this user.
-- [ ] User and mount namespaces via `rustix`. **Blocked:** `unshare(CLONE_NEWUSER)` fails; cause not yet pinned down. The AppArmor theory was disproven — that sysctl does not exist on this kernel.
-- [ ] Landlock ABI-version fallback matrix.
+- [ ] User and mount namespaces via `rustix`. **Blocked:** `unshare(CLONE_NEWUSER)` fails; cause not pinned down. The AppArmor theory is disproven — that sysctl does not exist on this kernel.
 - [ ] SCM_RIGHTS fd passing.
+- [ ] `ptrace`, `clone`, `io_uring`, `perf_event_open` are outside both Landlock and these profiles.
 
-**Consequence:** the sandbox currently rests on Landlock + seccomp only. Landlock alone does not stop a process opening a socket, so network egress needs `LANDLOCK_ACCESS_FS_NET` (ABI V4, available) or a seccomp filter blocking `socket`.
+**Consequence:** the sandbox rests on Landlock + seccomp. `socket(2)` is now refused, so the network hole Landlock leaves is closed. cgroups and namespaces remain blocked, so there are no CPU, memory, or pid limits and no filesystem isolation beyond the granted tree.
 
 ## Phase 3 — Inference layer and constrained decoding
 

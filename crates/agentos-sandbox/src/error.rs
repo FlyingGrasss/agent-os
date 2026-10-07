@@ -96,6 +96,40 @@ pub enum ConfineError {
     UnsupportedPlatform,
 }
 
+/// Why a seccomp filter could not be installed.
+///
+/// Every variant is a refusal. There is no "installed something weaker" path,
+/// because a weaker filter that reports success is precisely the failure this
+/// crate exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SeccompError {
+    /// This build or platform has no seccomp at all.
+    #[error("seccomp is not available on this platform")]
+    UnsupportedPlatform,
+    /// The architecture's syscall numbers are unknown, so no filter is built.
+    ///
+    /// Guessing here would allow whatever the guessed numbers happen to be,
+    /// which is the outcome seccomp is installed to prevent.
+    #[error("syscall numbers are unknown for this architecture, refusing to guess")]
+    UnknownPlatform,
+    /// The filter cannot be installed without `PR_SET_NO_NEW_PRIVS`.
+    #[error("PR_SET_NO_NEW_PRIVS must be set before a seccomp filter can be installed")]
+    NoNewPrivs,
+    /// The kernel refused the program.
+    #[error("seccomp refused the filter: {0}")]
+    KernelRefused(String),
+    /// The instruction sequence would need a BPF jump offset larger than `u8`.
+    #[error("seccomp filter is too large for BPF's jump limit")]
+    FilterTooLarge,
+}
+
+impl SeccompError {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_errno(e: std::io::Error) -> Self {
+        SeccompError::KernelRefused(e.to_string())
+    }
+}
+
 /// `Vec<Feature>` has no `Display`, so render the right names by hand.
 fn describe(features: &[Feature]) -> String {
     if features.is_empty() {

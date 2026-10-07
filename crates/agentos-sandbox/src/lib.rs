@@ -137,5 +137,13 @@ mod grants;
 
 pub use abi::{detect as detect_kernel_support, Abi, Feature, KernelSupport, TARGET_ABI};
 pub use confine::{Confine, Enforced};
-pub use error::ConfineError;
+pub use error::{ConfineError, SeccompError};
 pub use grants::{FsGrant, NetGrant, ReadOnly, ReadOnlyExec, ReadWrite};
+// `SeccompApplied` and `apply_seccomp` only exist on Linux. Off Linux the module
+// still compiles to nothing usable, which is deliberate: a caller that asks for
+// a seccomp profile on Windows gets a compile error rather than a filter that
+// was never installed.
+#[cfg(target_os = "linux")]
+pub use seccomp::{Profile as SeccompProfile, SeccompApplied, apply_seccomp};
+
+mod seccomp;
