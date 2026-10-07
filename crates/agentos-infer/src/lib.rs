@@ -17,7 +17,11 @@ use agentos_types::{Quarantined, SourceId, Trusted, Val};
 /// The I1 proof obligation: no untrusted value reaches a prompt.
 pub mod leak;
 
+/// Extraction schemas, which are the real boundary for role Q.
+pub mod schema;
+
 pub use leak::{LeakReport, PromptSlot};
+pub use schema::{Constraint, Field, Schema, SchemaRegistry, ValidationError};
 
 /// Which model role is being invoked.
 ///

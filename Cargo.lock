@@ -49,6 +49,7 @@ dependencies = [
 name = "agentos-infer"
 version = "0.1.0"
 dependencies = [
+ "agentos-dsl",
  "agentos-types",
  "serde",
  "serde_json",

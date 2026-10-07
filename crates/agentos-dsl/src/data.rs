@@ -50,11 +50,15 @@ impl PlanData {
         PlanData::Quoted { text, source }
     }
 
-    pub fn record(fields: Vec<(&str, PlanData)>) -> Self {
+    pub fn record<I, K>(fields: I) -> Self
+    where
+        I: IntoIterator<Item = (K, PlanData)>,
+        K: Into<String>,
+    {
         PlanData::Record(
             fields
                 .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
+                .map(|(k, v)| (k.into(), v))
                 .collect(),
         )
     }
