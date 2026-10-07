@@ -9,3 +9,13 @@ license.workspace = true
 agentos-types = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+# Landlock LSM confinement. Linux only; the crate compiles elsewhere without it.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+libc = "0.2"
+
+# The escape tests make raw syscalls (socket(2), kill(2), prctl(2)) so they can
+# assert on exactly which syscall was refused rather than on a std wrapper.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
