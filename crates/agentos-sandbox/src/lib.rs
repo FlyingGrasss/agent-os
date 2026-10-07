@@ -139,6 +139,10 @@ pub use abi::{detect as detect_kernel_support, Abi, Feature, KernelSupport, TARG
 pub use confine::{Confine, Enforced};
 pub use error::{ConfineError, SeccompError};
 pub use grants::{FsGrant, NetGrant, ReadOnly, ReadOnlyExec, ReadWrite};
+
+/// Passing capabilities to a worker as real descriptors.
+#[cfg(unix)]
+pub mod fdpass;
 // `SeccompApplied` and `apply_seccomp` only exist on Linux. Off Linux the module
 // still compiles to nothing usable, which is deliberate: a caller that asks for
 // a seccomp profile on Windows gets a compile error rather than a filter that
