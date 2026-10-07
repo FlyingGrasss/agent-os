@@ -84,8 +84,12 @@ dependencies = [
 name = "agentos-tools"
 version = "0.1.0"
 dependencies = [
+ "agentos-dsl",
+ "agentos-policy",
  "agentos-types",
+ "schemars",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

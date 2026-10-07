@@ -1,4 +1,4 @@
-//! The policy engine.
+﻿//! The policy engine.
 //!
 //! Every sensitive tool argument is classified before the tool runs. The
 //! decision depends on the argument's provenance label, which is why a
@@ -7,9 +7,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use agentos_types::{SourceKind, Val};
+use agentos_types::SourceKind;
 use serde::{Deserialize, Serialize};
 
+use crate::argview::ArgView;
 use crate::rule::{Rule, RuleSet};
 
 /// What the policy engine decided about one tool invocation.
@@ -98,7 +99,12 @@ impl PolicyEngine {
     }
 
     /// Evaluate a tool call. Arguments arrive as labeled values.
-    pub fn evaluate(&self, tool: &str, args: &BTreeMap<String, Val<String>>) -> Decision {
+    ///
+    /// Takes [`ArgView`] rather than `Val<String>` so that the label and the
+    /// text of an argument are structurally inseparable by the time a decision
+    /// is made. See that type for why the obvious alternative is a laundering
+    /// path.
+    pub fn evaluate(&self, tool: &str, args: &BTreeMap<String, ArgView<'_>>) -> Decision {
         let mut items = Vec::new();
 
         for (arg, value) in args {
@@ -106,7 +112,6 @@ impl PolicyEngine {
                 continue;
             }
             let op = format!("{tool}.{arg}");
-            let text = value.with_label_for_display(|t, _| t.clone());
 
             match self.rules.lookup(tool, arg) {
                 Rule::Allow => continue,
@@ -124,7 +129,7 @@ impl PolicyEngine {
                         .collect();
                     items.push(ConfirmationItem {
                         arg: arg.clone(),
-                        value: text,
+                        value: value.display_text(),
                         provenance,
                     });
                 }
@@ -135,7 +140,10 @@ impl PolicyEngine {
                     }
                 }
                 Rule::Allowlist => {
-                    let domain = host_of(&text);
+                    // An allowlist rule inspects the argument as a URL. An
+                    // argument with no text form cannot be inspected, so it
+                    // fails closed rather than being treated as harmless.
+                    let domain = value.text().and_then(host_of);
                     match domain {
                         Some(d) if self.allowlist.contains(&d) => continue,
                         _ => {
@@ -219,7 +227,22 @@ fn host_of(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_types::{Label, SourceId};
+    use agentos_types::{Label, SourceId, Val};
+
+    /// Owns the values so a view can borrow from them. Tests construct the map
+    /// and then ask for views, rather than building views from temporaries.
+    pub(crate) struct Case {
+        vals: BTreeMap<String, Val<String>>,
+    }
+
+    impl Case {
+        pub(crate) fn views(&self) -> BTreeMap<String, ArgView<'_>> {
+            self.vals
+                .iter()
+                .map(|(k, v)| (k.clone(), ArgView::new(v, |t: &String| Some(t.clone()))))
+                .collect()
+        }
+    }
 
     /// A tainted value whose source was never classified, so its label reports
     /// `SourceKind::Unattributed`.
@@ -238,17 +261,33 @@ mod tests {
             .collect()
     }
 
+
+    /// Evaluate a map of plain text arguments.
+    ///
+    /// This convenience exists only so the tests below read as a table of
+    /// inputs and decisions. It is not the production path: the real host holds
+    /// `Val<PlanData>`, not `Val<String>`, and converting between them by hand
+    /// is exactly the laundering step `ArgView` exists to prevent.
+    fn evaluate(
+        engine: &PolicyEngine,
+        tool: &str,
+        vals: &BTreeMap<String, Val<String>>,
+    ) -> Decision {
+        engine.evaluate(tool, &Case { vals: vals.clone() }.views())
+    }
+
+
     #[test]
     fn trusted_arguments_pass_without_asking() {
         let engine = PolicyEngine::new(PolicyEngine::default_rules());
-        let d = engine.evaluate("send_email", &args(&[("to", trusted("a@b.c"))]));
+        let d = evaluate(&engine, "send_email", &args(&[("to", trusted("a@b.c"))]));
         assert_eq!(d, Decision::Allow);
     }
 
     #[test]
     fn tainted_recipient_requires_confirmation() {
         let engine = PolicyEngine::new(PolicyEngine::default_rules());
-        let d = engine.evaluate("send_email", &args(&[("to", tainted("evil@example.com"))]));
+        let d = evaluate(&engine, "send_email", &args(&[("to", tainted("evil@example.com"))]));
         match d {
             Decision::Confirm { request } => {
                 assert_eq!(request.tool, "send_email");
@@ -262,7 +301,7 @@ mod tests {
     #[test]
     fn tainted_shell_argv_is_denied_outright() {
         let engine = PolicyEngine::new(PolicyEngine::default_rules());
-        let d = engine.evaluate("shell", &args(&[("argv", tainted("rm -rf /"))]));
+        let d = evaluate(&engine, "shell", &args(&[("argv", tainted("rm -rf /"))]));
         match d {
             Decision::Deny { op, .. } => assert_eq!(op, "shell.argv"),
             other => panic!("expected deny, got {other:?}"),
@@ -272,7 +311,7 @@ mod tests {
     #[test]
     fn tainted_write_path_is_denied() {
         let engine = PolicyEngine::new(PolicyEngine::default_rules());
-        let d = engine.evaluate(
+        let d = evaluate(&engine, 
             "fs.write",
             &args(&[("path", tainted("~/.ssh/authorized_keys"))]),
         );
@@ -282,14 +321,14 @@ mod tests {
     #[test]
     fn tainted_url_needs_an_allowlisted_domain() {
         let mut engine = PolicyEngine::new(PolicyEngine::default_rules());
-        let d = engine.evaluate("http.get", &args(&[("url", tainted("https://evil.test/x"))]));
+        let d = evaluate(&engine, "http.get", &args(&[("url", tainted("https://evil.test/x"))]));
         assert!(
             matches!(d, Decision::Deny { .. }),
             "off-allowlist should deny, got {d:?}"
         );
 
         engine.allow_domain("good.test");
-        let d = engine.evaluate("http.get", &args(&[("url", tainted("https://good.test/x"))]));
+        let d = evaluate(&engine, "http.get", &args(&[("url", tainted("https://good.test/x"))]));
         assert_eq!(d, Decision::Allow);
     }
 
@@ -297,14 +336,14 @@ mod tests {
     fn allowlist_is_case_insensitive_on_both_sides() {
         let mut engine = PolicyEngine::new(PolicyEngine::default_rules());
         engine.allow_domain("Good.Test");
-        let d = engine.evaluate("http.get", &args(&[("url", tainted("https://GOOD.test:8443/x"))]));
+        let d = evaluate(&engine, "http.get", &args(&[("url", tainted("https://GOOD.test:8443/x"))]));
         assert_eq!(d, Decision::Allow);
     }
 
     #[test]
     fn deny_takes_priority_over_confirm_in_the_same_call() {
         let engine = PolicyEngine::new(PolicyEngine::default_rules());
-        let d = engine.evaluate(
+        let d = evaluate(&engine, 
             "send_email",
             &args(&[("to", tainted("a@b.c")), ("body", tainted("hi"))]),
         );
@@ -318,7 +357,7 @@ mod tests {
         mixed.deny_tainted("send_email", "body");
         mixed.confirm_tainted("send_email", "to");
         let engine = PolicyEngine::new(mixed);
-        let d = engine.evaluate(
+        let d = evaluate(&engine, 
             "send_email",
             &args(&[("to", tainted("a@b.c")), ("body", tainted("hi"))]),
         );
@@ -330,7 +369,7 @@ mod tests {
         // A rule that is absent must fail closed, or adding a new tool would be
         // an invisible security hole.
         let engine = PolicyEngine::new(RuleSet::default());
-        let d = engine.evaluate("brand_new_tool", &args(&[("target", tainted("x"))]));
+        let d = evaluate(&engine, "brand_new_tool", &args(&[("target", tainted("x"))]));
         assert!(matches!(d, Decision::Confirm { .. }));
     }
 
@@ -373,7 +412,7 @@ mod tests {
             "HTTP2://good.test/",
             "ws://good.test/",
         ] {
-            let d = engine.evaluate("http.get", &args(&[("url", tainted(attack))]));
+            let d = evaluate(&engine, "http.get", &args(&[("url", tainted(attack))]));
             assert!(
                 matches!(d, Decision::Deny { .. }),
                 "non-HTTP scheme {attack} must not be allowed for an \
@@ -388,12 +427,12 @@ mod tests {
         let mut engine = PolicyEngine::new(PolicyEngine::default_rules());
         engine.allow_domain("good.test");
         for url in ["http://good.test/x", "https://good.test/x"] {
-            assert_eq!(engine.evaluate("http.get", &args(&[("url", tainted(url))])), Decision::Allow);
+            assert_eq!(evaluate(&engine, "http.get", &args(&[("url", tainted(url))])), Decision::Allow);
         }
         // The scheme comparison must not accidentally be case-sensitive.
         for url in ["HTTP://good.test/x", "HtTpS://good.test/x"] {
             assert_eq!(
-                engine.evaluate("http.get", &args(&[("url", tainted(url))])),
+                evaluate(&engine, "http.get", &args(&[("url", tainted(url))])),
                 Decision::Allow,
                 "{url} is an HTTP fetch and should be allowed"
             );
@@ -425,7 +464,7 @@ mod tests {
             Label::from_source(SourceId::new(), SourceKind::Email),
         );
         let engine = PolicyEngine::new(PolicyEngine::default_rules());
-        let d = engine.evaluate("send_email", &args(&[("to", val)]));
+        let d = evaluate(&engine, "send_email", &args(&[("to", val)]));
         match d {
             Decision::Confirm { request } => {
                 assert_eq!(
@@ -449,7 +488,7 @@ mod tests {
             .join(&Label::from_source(mail, SourceKind::Email));
 
         let engine = PolicyEngine::new(PolicyEngine::default_rules());
-        let d = engine.evaluate(
+        let d = evaluate(&engine, 
             "send_email",
             &args(&[("to", Val::labeled("a@b.c".to_string(), label))]),
         );
@@ -476,7 +515,7 @@ mod tests {
             .join(&Label::tainted(SourceId::of_kind(SourceKind::WebPage)))
             .join(&Label::tainted(SourceId::of_kind(SourceKind::WebPage)));
         let engine = PolicyEngine::new(PolicyEngine::default_rules());
-        let d = engine.evaluate(
+        let d = evaluate(&engine, 
             "send_email",
             &args(&[("to", Val::labeled("a@b.c".to_string(), label))]),
         );
@@ -496,7 +535,7 @@ mod tests {
         // Failing to name the origin is not the same as having no origin. An
         // empty list here would read to a user as "nothing untrusted here".
         let engine = PolicyEngine::new(PolicyEngine::default_rules());
-        let d = engine.evaluate(
+        let d = evaluate(&engine, 
             "send_email",
             &args(&[("to", tainted("evil@example.com"))]),
         );
@@ -520,10 +559,13 @@ mod tests {
         let mut engine = PolicyEngine::new(PolicyEngine::default_rules());
         engine.allow_domain("good.test");
         let attack = "https://good.test@evil.test/x";
-        let d = engine.evaluate("http.get", &args(&[("url", tainted(attack))]));
+        let d = evaluate(&engine, "http.get", &args(&[("url", tainted(attack))]));
         assert!(
             matches!(d, Decision::Deny { .. }),
             "expected deny for {attack}, got {d:?}"
         );
     }
 }
+
+
+

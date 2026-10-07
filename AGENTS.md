@@ -72,6 +72,39 @@ explicitly confirmed, and confirmation is the only path to a prompt.
    A tainted value in a shell argument or write path is denied outright;
    confirmation cannot override a deny.
 
+## Use subagents aggressively
+
+Parallelism is the default, not an optimization. Dispatch subagents for
+substantive work rather than doing it inline, and dispatch independent items
+**in a single message** so they run concurrently. Waiting on them one at a time
+defeats the purpose.
+
+- **Split by file ownership.** Two agents editing the same file will conflict.
+  Before fanning out, decide which files each agent owns and say so in its
+  prompt. If the work does not separate cleanly along file boundaries, do not
+  force parallelism on that item.
+- **Give every subagent full context.** It starts with a fresh context and
+  cannot see this conversation. Include which files it owns, the conventions
+  above, and the build command. Never write "as discussed above".
+- **Never duplicate a dispatched agent's work.** While they run, do
+  something non-overlapping or nothing.
+- **Verify their claims yourself.** Run the tests and read the diffs. Do not
+  relay a subagent's claim that something compiles or passes; check it. Their
+  reports are leads, not evidence.
+- **Do not trust a subagent's security conclusions.** A subagent that says
+  the code is sound has read some of it. For anything load-bearing, read the
+  enforcement point yourself.
+- **Send independent investigations in one batch.** Verification, research,
+  and review that touch different crates or different files should all be in
+  flight together, not serialised.
+
+Available agents: `rust-impl` (portable Rust), `linux-sandbox` (Landlock,
+seccomp, cgroups, namespaces, eBPF), `security-reviewer` (read-only
+adversarial review), `explore-agentos` (read-only search).
+
+Do not use a subagent for work that is faster to just do, such as reading one
+file to answer a one-line question, or running a single test command.
+
 ## Working conventions
 
 Carried over from earlier work, still applicable:
