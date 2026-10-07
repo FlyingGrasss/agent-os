@@ -15,7 +15,7 @@ use std::rc::Rc;
 use agentos_dsl::{PlanData, PlanError, PlanValue, ToolHost};
 use agentos_policy::PolicyEngine;
 use crate::audit::{AuditLog, MemorySink, SystemClock};
-use crate::{PolicyHost, Tool};
+use crate::{FsWrite, PolicyHost, Tool, WriteGrant, ARG_CONTENTS, ARG_PATH};
 use agentos_types::{SourceId, SourceKind};
 
 /// The injection payload used throughout. Asserted absent from audit records.
@@ -328,6 +328,235 @@ fn the_attempt_is_recorded_before_the_tool_runs() {
         "the tool observed an empty audit log, so the attempt was not durable first"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `fs.write` through the real host: policy and confinement are separate controls
+// ---------------------------------------------------------------------------
+//
+// The point of these is the distinction. Policy answers "may this value be
+// used here", and it answers that from the value's provenance. Confinement
+// answers "what may this tool touch", and it answers that from a grant handed in
+// at construction. A test that only checked "the call failed" would pass whether
+// the refusal came from policy, from containment, or from a tool that refuses
+// everything, so each test here also pins *which* control fired.
+
+/// A granted directory plus a sibling that shares its name prefix.
+///
+/// Both live in a fresh temporary tree, removed on drop.
+struct FsScratch {
+    root: std::path::PathBuf,
+}
+
+impl FsScratch {
+    fn new(tag: &str) -> FsScratch {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "agentos-tools-policy-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(base.join("data")).expect("create grant");
+        std::fs::create_dir_all(base.join("data-evil")).expect("create sibling");
+        std::fs::write(base.join("data-evil").join("loot.txt"), b"original\n")
+            .expect("seed outside target");
+        // Canonicalised to the same spelling `WriteGrant` holds, so a containment
+        // comparison here is about containment.
+        let root = std::fs::canonicalize(base).expect("canonicalize scratch");
+        FsScratch { root }
+    }
+
+    fn grant(&self) -> WriteGrant {
+        WriteGrant::new(self.root.join("data")).expect("grant")
+    }
+
+    fn loot(&self) -> std::path::PathBuf {
+        self.root.join("data-evil").join("loot.txt")
+    }
+}
+
+impl Drop for FsScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn fs_host(grant: WriteGrant, sink: &MemorySink) -> PolicyHost {
+    let mut host = PolicyHost::new(
+        PolicyEngine::new(PolicyEngine::default_rules()),
+        AuditLog::new(Box::new(sink.clone()), Box::new(SystemClock)),
+    );
+    host.register(Box::new(FsWrite::new(grant)));
+    host
+}
+
+fn write_args(path: PlanValue, contents: PlanValue) -> BTreeMap<String, PlanValue> {
+    let mut args = BTreeMap::new();
+    args.insert(ARG_PATH.to_string(), path);
+    args.insert(ARG_CONTENTS.to_string(), contents);
+    args
+}
+
+#[test]
+fn a_trusted_path_inside_the_grant_is_written() {
+    let sink = MemorySink::new();
+    let scratch = FsScratch::new("allowed");
+    let mut host = fs_host(scratch.grant(), &sink);
+
+    let target = scratch.root.join("data").join("note.txt");
+    host.call(
+        "fs.write",
+        &write_args(
+            trusted_str("note.txt"),
+            trusted_str("planned content"),
+        ),
+    )
+    .expect("a trusted path inside the grant is a legitimate write");
+
+    assert_eq!(std::fs::read(&target).expect("written"), b"planned content");
+    assert!(host.take_pending().is_empty(), "nothing needed a human");
+}
+
+#[test]
+fn a_tainted_path_is_denied_by_policy_and_nothing_is_written() {
+    // I4: the path came from a web page, so the user never authorised this
+    // write. It is refused before the tool is dispatched, which is why the file
+    // is absent rather than merely unmodified.
+    let sink = MemorySink::new();
+    let scratch = FsScratch::new("tainted-path");
+    let mut host = fs_host(scratch.grant(), &sink);
+
+    // A tainted path that is *inside* the grant. The grant would have permitted
+    // it; only provenance stops it, which is the whole content of I4.
+    let err = host
+        .call(
+            "fs.write",
+            &write_args(tainted_str("planted.txt"), trusted_str("x")),
+        )
+        .expect_err("a tainted path must be refused");
+
+    match err {
+        PlanError::PolicyDenied { op, .. } => assert_eq!(op, "fs.write.path"),
+        other => panic!("expected a policy denial, got {other:?}"),
+    }
+    assert!(
+        !scratch.root.join("data").join("planted.txt").exists(),
+        "the tainted path was written despite the denial"
+    );
+
+    // The audit log records the attempt and never stores the path's bytes.
+    let log = sink.reader().lines().join("\n");
+    assert!(log.contains("fs.write"), "{log}");
+    assert!(!log.contains("planted.txt"), "the tainted path leaked: {log}");
+}
+
+#[test]
+fn a_tainted_body_is_denied_too() {
+    let sink = MemorySink::new();
+    let scratch = FsScratch::new("tainted-body");
+    let mut host = fs_host(scratch.grant(), &sink);
+
+    let err = host
+        .call(
+            "fs.write",
+            &write_args(trusted_str("note.txt"), tainted_str(PAYLOAD)),
+        )
+        .expect_err("a tainted body must be refused");
+    match err {
+        PlanError::PolicyDenied { op, .. } => assert_eq!(op, "fs.write.contents"),
+        other => panic!("expected a policy denial, got {other:?}"),
+    }
+    assert!(
+        !scratch.root.join("data").join("note.txt").exists(),
+        "the file was created from a tainted body"
+    );
+    assert!(
+        !sink.reader().lines().join("\n").contains("ZQXJ"),
+        "the tainted body reached the audit log"
+    );
+}
+
+#[test]
+fn a_trusted_path_that_escapes_the_grant_is_refused_by_confinement_not_policy() {
+    // Both arguments are trusted, so the policy engine has nothing to object
+    // to and returns Allow. What refuses the call is the tool's containment.
+    // Asserting the decision first is what stops this test from passing for the
+    // wrong reason.
+    let sink = MemorySink::new();
+    let scratch = FsScratch::new("escape");
+    let mut host = fs_host(scratch.grant(), &sink);
+
+    let escaping = "../data-evil/loot.txt";
+    let args = write_args(trusted_str(escaping), trusted_str("pwned"));
+
+    assert_eq!(
+        host.engine().evaluate(
+            "fs.write",
+            &agentos_policy::arg_views(args.iter(), |d: &PlanData| d.as_text()),
+        ),
+        agentos_policy::Decision::Allow,
+        "policy must have no objection here, or this test proves nothing about \
+         confinement"
+    );
+
+    let err = host.call("fs.write", &args).expect_err("the escape must fail");
+    match err {
+        PlanError::ToolRejected { tool, .. } => assert_eq!(tool, "fs.write"),
+        other => panic!(
+            "the refusal must come from the tool, not from policy or a \
+             confirmation; got {other:?}"
+        ),
+    }
+
+    assert_eq!(
+        std::fs::read(scratch.loot()).expect("loot readable"),
+        b"original\n",
+        "the file outside the grant was modified"
+    );
+}
+
+#[test]
+fn a_quarantined_path_is_refused_and_nothing_is_written() {
+    // `Quoted` is unreadable by design. Policy sees it as tainted and denies on
+    // the label alone, and the tool would refuse it as having no text form, so
+    // the two controls agree rather than one covering for the other.
+    let sink = MemorySink::new();
+    let scratch = FsScratch::new("quoted");
+    let mut host = fs_host(scratch.grant(), &sink);
+
+    let err = host
+        .call(
+            "fs.write",
+            &write_args(tainted_quoted("loot.txt"), trusted_str("x")),
+        )
+        .expect_err("a quarantined path must be refused");
+    assert!(
+        matches!(err, PlanError::PolicyDenied { .. }),
+        "expected a policy denial, got {err:?}"
+    );
+    assert!(!scratch.root.join("data").join("loot.txt").exists());
+}
+
+#[test]
+fn the_grant_cannot_be_named_in_an_argument() {
+    // The authority is the constructor argument, so a plan cannot widen it. An
+    // extra argument is refused before the tool looks at anything else.
+    let sink = MemorySink::new();
+    let scratch = FsScratch::new("no-widening");
+    let mut host = fs_host(scratch.grant(), &sink);
+
+    let mut args = write_args(trusted_str("note.txt"), trusted_str("x"));
+    args.insert("root".to_string(), trusted_str("/"));
+    assert!(
+        host.call("fs.write", &args).is_err(),
+        "an undeclared argument must not be ignored"
+    );
+    assert!(!scratch.root.join("data").join("note.txt").exists());
+    assert_eq!(
+        std::fs::read(scratch.loot()).expect("loot readable"),
+        b"original\n"
+    );
+}
+
 
 #[test]
 fn a_tool_with_no_rules_at_all_still_halts_on_a_tainted_argument() {

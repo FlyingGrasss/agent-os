@@ -12,6 +12,7 @@
 //! attacker's instructions. See the [`audit`] module docs for the exact policy.
 
 pub mod audit;
+pub mod fswrite;
 pub mod host;
 #[cfg(test)]
 mod tests;
@@ -21,5 +22,9 @@ pub use audit::{
     AttemptToken, BoundedText, Clock, FileSink, Fingerprint, MemoryReader, MemorySink, OutcomeKind,
     PolicySummary, RecordedValue, SystemClock, MAX_ARGS_PER_RECORD, MAX_NAME, MAX_REASON,
     MAX_SOURCES_PER_ARG, MAX_TRUSTED_PREFIX,
+};
+pub use fswrite::{
+    FsWrite, LabelledArgs, WriteArgs, WriteError, WriteGrant, WriteReceipt, ARG_CONTENTS,
+    ARG_PATH, TOOL_NAME,
 };
 pub use host::{PendingConfirmation, PolicyHost, Tool};

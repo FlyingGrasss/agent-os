@@ -9,6 +9,9 @@ license.workspace = true
 agentos-types = { workspace = true }
 agentos-dsl = { workspace = true }
 agentos-policy = { workspace = true }
+# The filesystem confinement the escape tests exercise. Path-dep rather than a
+# workspace entry because the workspace manifest is not this crate's to edit.
+agentos-sandbox = { path = "../agentos-sandbox" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
