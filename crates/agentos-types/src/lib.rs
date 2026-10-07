@@ -10,7 +10,7 @@ mod event;
 mod provenance;
 mod value;
 
-pub use capability::{Cap, CapId, CapKind, CapRegistry};
+pub use capability::{Cap, CapId, CapKind, CapRegistry, CapabilityError};
 pub use event::{Event, EventId};
 pub use provenance::{Label, SourceId, SourceKind};
 pub use value::{
