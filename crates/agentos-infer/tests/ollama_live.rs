@@ -22,6 +22,12 @@
 //! would make the suite a function of which checkpoint happened to be pulled, so
 //! the model-quality observation is reported and not asserted.
 
+// Feature-gated for the same reason `ollama.rs` is: an integration test is
+// compiled whether or not the feature is on, so without this a default build
+// fails on imports the module does not provide. Found by running the default
+// workspace build after adding only the `--features ollama` run.
+#![cfg(feature = "ollama")]
+
 use std::time::Instant;
 
 use agentos_infer::{

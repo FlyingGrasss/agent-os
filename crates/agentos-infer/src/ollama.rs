@@ -202,14 +202,23 @@ impl Ollama {
             .collect()
     }
 
-    /// One HTTP POST to the Ollama endpoint.
+    /// One HTTP exchange with the Ollama endpoint.
     ///
-    /// Hand-rolled rather than pulling in an HTTP client: the request is a single
-    /// JSON POST to a known loopback port, and adding a dependency with its own
-    /// TLS stack and redirect policy would be more attack surface than the thing
+    /// Hand-rolled rather than pulling in an HTTP client: the requests are simple
+    /// JSON to a known loopback port, and adding a dependency with its own TLS
+    /// stack and redirect policy would be more attack surface than the thing
     /// being protected. It also keeps `agentos-infer` free of async, which the
     /// `Backend` trait requires anyway.
     fn post_json(&self, path: &str, body: &Value) -> Result<Value, InferError> {
+        self.exchange("POST", path, Some(body))
+    }
+
+    /// A GET. Ollama's `/api/tags` is GET-only, and POSTing it answers `405`.
+    fn get_json(&self, path: &str) -> Result<Value, InferError> {
+        self.exchange("GET", path, None)
+    }
+
+    fn exchange(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, InferError> {
         let (host_port, request_path) = self.split_endpoint(path)?;
         let mut stream = TcpStream::connect(&host_port).map_err(|e| {
             InferError::Backend(format!(
@@ -220,13 +229,29 @@ impl Ollama {
         stream.set_read_timeout(Some(self.timeout)).ok();
         stream.set_write_timeout(Some(self.timeout)).ok();
 
-        let payload = serde_json::to_vec(body)
-            .map_err(|e| InferError::Backend(format!("cannot encode request: {e}")))?;
-        let head = format!(
-            "POST {request_path} HTTP/1.1\r\nHost: {host_port}\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n",
-            payload.len()
-        );
+        let (head, payload) = match body {
+            Some(body) => {
+                let payload = serde_json::to_vec(body)
+                    .map_err(|e| InferError::Backend(format!("cannot encode request: {e}")))?;
+                (
+                    format!(
+                        "{method} {request_path} HTTP/1.1\r\nHost: {host_port}\r\n\
+                         Content-Type: application/json\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        payload.len()
+                    ),
+                    payload,
+                )
+            }
+            None => (
+                format!(
+                    "{method} {request_path} HTTP/1.1\r\nHost: {host_port}\r\n\
+                     Connection: close\r\n\r\n"
+                ),
+                Vec::new(),
+            ),
+        };
+
         stream
             .write_all(head.as_bytes())
             .and_then(|_| stream.write_all(&payload))
@@ -249,18 +274,43 @@ impl Ollama {
             .and_then(|l| l.split_whitespace().nth(1))
             .and_then(|c| c.parse().ok())
             .unwrap_or(0);
-        // Chunked bodies are not decoded. Ollama sends `Content-Length` for
-        // `/api/chat`; a chunked reply here would fail to parse and say so,
-        // rather than being silently truncated into a wrong answer.
-        let value: Value = serde_json::from_str(body)
-            .map_err(|e| InferError::Backend(format!("cannot parse response (status {status}): {e}")))?;
+        // Status is checked BEFORE the body is parsed.
+        //
+        // This ordering is the fix for a bug the live test found: a wrong method
+        // against a GET-only endpoint returns 405 with a body that is not JSON, so
+        // parsing first reported `trailing characters at line 1 column 5` and
+        // buried the only useful fact, which was the status. A parse failure on a
+        // non-2xx response is a symptom; the status is the cause.
+        //
+        // Chunked bodies are still not decoded. Ollama sends `Content-Length` for
+        // `/api/chat`; a chunked reply fails to parse and says so, rather than
+        // being silently truncated into a wrong answer.
         if !(200..300).contains(&status) {
-            let message = value
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("no error message");
-            return Err(InferError::Backend(format!("ollama returned {status}: {message}")));
+            // Best-effort extraction of the server's own message. Never a hard
+            // failure: an error body can be anything, including an HTML page from
+            // something that is not Ollama at all.
+            let detail = serde_json::from_str::<Value>(body)
+                .ok()
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_else(|| {
+                    let trimmed = body.trim();
+                    if trimmed.is_empty() {
+                        "no response body".to_string()
+                    } else {
+                        // Bounded, and with the body not necessarily ours: this
+                        // string reaches an operator's terminal.
+                        trimmed.chars().take(200).collect()
+                    }
+                });
+            return Err(InferError::Backend(format!(
+                "ollama returned {status} for {method} {request_path}: {detail}"
+            )));
         }
+        let value: Value = serde_json::from_str(body).map_err(|e| {
+            InferError::Backend(format!(
+                "cannot parse a {status} response from {method} {request_path}: {e}"
+            ))
+        })?;
         Ok(value)
     }
 
@@ -284,8 +334,13 @@ impl Ollama {
     /// Separate from the constructor on purpose: a build that constructs a
     /// backend at startup should not fail because a model has not been pulled
     /// yet, and a test should be able to ask without issuing an inference call.
+    ///
+    /// GET, not POST. `/api/tags` is read-only and answers `405` to a POST. The
+    /// live test found this, and it was invisible until then because the client
+    /// parsed the body before checking the status, so the only symptom was a
+    /// confusing JSON parse failure.
     pub fn probe(&self) -> Result<Vec<String>, InferError> {
-        let value = self.post_json("/api/tags", &json!({}))?;
+        let value = self.get_json("/api/tags")?;
         let names = value
             .get("models")
             .and_then(Value::as_array)

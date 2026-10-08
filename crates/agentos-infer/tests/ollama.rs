@@ -60,6 +60,7 @@ fn planner_conversation() -> Conversation {
 /// What the fake server received, so a test can assert on the request.
 #[derive(Debug, Clone)]
 struct Received {
+    method: String,
     path: String,
     body: serde_json::Value,
 }
@@ -105,14 +106,16 @@ fn serve_once(status: u16, body: &str) -> (String, mpsc::Receiver<Received>) {
             }
             buf.extend_from_slice(&tmp[..n]);
         }
-        let path = head
-            .lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(1))
+        let request_line = head.lines().next().unwrap_or("");
+        let method = request_line.split_whitespace().next().unwrap_or("").to_string();
+        let path = request_line
+            .split_whitespace()
+            .nth(1)
             .unwrap_or("")
             .to_string();
         let parsed = serde_json::from_slice(&buf[head_end..]).unwrap_or(serde_json::Value::Null);
         let _ = tx.send(Received {
+            method,
             path,
             body: parsed,
         });
@@ -443,6 +446,51 @@ fn non_json_from_the_extractor_is_a_schema_violation() {
 // ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
+
+/// A non-JSON error body must not masquerade as a parse failure.
+///
+/// Found by the live test, not by review. `probe` POSTed to `/api/tags`, which is
+/// GET-only, so Ollama answered `405` with a body that is not JSON. The client
+/// parsed before checking the status, so the reported error was
+/// `cannot parse response (status 405): trailing characters at line 1 column 5`
+/// — which mentions the status in passing and leads with the parse error, hiding
+/// the only fact that mattered.
+///
+/// The fake server here answers 405 with a deliberately non-JSON body, because
+/// that is the case being pinned down: a body this client cannot parse must still
+/// produce an error naming the status and the method.
+#[test]
+fn a_non_json_error_body_reports_the_status_not_a_parse_failure() {
+    let (endpoint, rx) = serve_once(405, "Method Not Allowed\n");
+    let probe = Ollama::new(RoleModels::Shared {
+        model: "m".into(),
+    })
+    .with_endpoint(endpoint)
+    .unwrap();
+
+    let err = probe.probe().expect_err("a 405 must be an error");
+    let text = err.to_string();
+
+    // The request must have been a GET. This is the actual bug.
+    let got = rx.recv().expect("server saw the request");
+    assert_eq!(
+        got.method, "GET",
+        "/api/tags is read-only; a POST is answered with 405"
+    );
+
+    assert!(
+        !text.contains("trailing characters"),
+        "a non-JSON error body must not be reported as a parse failure: {text}"
+    );
+    assert!(
+        text.contains("405"),
+        "the status must be the headline, not an aside: {text}"
+    );
+    assert!(
+        text.contains("GET"),
+        "the method and path should be named so the caller can see what was tried: {text}"
+    );
+}
 
 /// A server error is surfaced with its message, not swallowed.
 #[test]
