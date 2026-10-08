@@ -143,6 +143,15 @@ pub use grants::{FsGrant, NetGrant, ReadOnly, ReadOnlyExec, ReadWrite};
 /// Passing capabilities to a worker as real descriptors.
 #[cfg(unix)]
 pub mod fdpass;
+/// A pool of pre-confined workers.
+///
+/// Unix-only, for the same reason `fdpass` is: the pool's whole mechanism is
+/// `fork`/`execveat` plus a control socket, and a worker that cannot be forked
+/// and confined is not a worker pool. Gating the module rather than stubbing the
+/// types keeps a Windows caller from compiling against a `Pool` whose confinement
+/// would have been a no-op.
+#[cfg(unix)]
+pub mod pool;
 // `SeccompApplied` and `apply_seccomp` only exist on Linux. Off Linux the module
 // still compiles to nothing usable, which is deliberate: a caller that asks for
 // a seccomp profile on Windows gets a compile error rather than a filter that

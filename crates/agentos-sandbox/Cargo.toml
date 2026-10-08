@@ -13,9 +13,22 @@ thiserror = { workspace = true }
 # Landlock LSM confinement. Linux only; the crate compiles elsewhere without it.
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
+
+# The pool's fd passing, its Unix control socket, and both worker images use raw
+# syscalls so a test can assert on exactly which syscall was refused. That is
+# Unix, not Linux: `agentos-quarantine` needs it on the same basis.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 # The escape tests make raw syscalls (socket(2), kill(2), prctl(2)) so they can
 # assert on exactly which syscall was refused rather than on a std wrapper.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libc = "0.2"
+
+[[bin]]
+name = "agentos-worker"
+path = "src/bin/agentos-worker.rs"
+
+[[bin]]
+name = "agentos-probe-worker"
+path = "src/bin/agentos-probe-worker.rs"
