@@ -1,4 +1,4 @@
-﻿//! Tests for the disclosure round trip.
+//! Tests for the disclosure round trip.
 //!
 //! The property under test is that a user approval authorises *exactly* the
 //! value they were shown. That sounds obvious and is easy to get wrong: the
@@ -77,9 +77,24 @@ fn host_with(tool: Box<dyn Tool>, sink: &MemorySink) -> PolicyHost {
     host
 }
 
+/// Serialises every test in this module.
+///
+/// `agentos_infer::leak`'s counters are a process-wide singleton on purpose, and
+/// libtest runs tests on separate threads in one process, so any test that drains
+/// a confirmation moves counters that any other test's assertion can see. Every
+/// test here holds this, not just the ones that read the counters, because a test
+/// that only *writes* them is enough to break a neighbour's exact count.
+///
+/// This is the second time this workspace has hit that trap â€” `agentos-infer`'s
+/// own leak tests had the same shape and the same bug.
+fn counters_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn a_halted_call_raises_a_request_the_user_can_be_shown() {
-    let sink = MemorySink::new();
+    let _counters = counters_guard();    let sink = MemorySink::new();
     let (spy, calls) = Spy::new("send_email");
     let mut host = host_with(Box::new(spy), &sink);
 
@@ -110,21 +125,53 @@ fn a_halted_call_raises_a_request_the_user_can_be_shown() {
 
 #[test]
 fn approval_promotes_exactly_the_value_that_was_shown() {
-    let sink = MemorySink::new();
+    let _counters = counters_guard();    let sink = MemorySink::new();
     let (spy, _calls) = Spy::new("send_email");
     let mut host = host_with(Box::new(spy), &sink);
 
-    let shown_value = tainted_recipient("evil@example.com");
-    let disclosure = Disclosure::new(user(), &mut host);
+    // Go through a real halt so the promotion has a policy decision behind it.
+    let mut args = BTreeMap::new();
+    args.insert(
+        "to".to_string(),
+        tainted_recipient("evil@example.com"),
+    );
+    let _ = host.call("send_email", &args);
 
-    let approved = disclosure.approve(&shown_value).expect("approval should succeed");
+    let mut disclosure = Disclosure::new(user(), &mut host);
+    disclosure.drain(|_| true).expect("drain");
+
+    let shown_value = tainted_recipient("evil@example.com");
+    let pending = disclosure.approved_request().expect("the approved request");
+
+    let approved = disclosure
+        .approve(pending, &shown_value)
+        .expect("approval should succeed");
     assert_eq!(approved.get().as_text().as_deref(), Some("evil@example.com"));
     assert_eq!(approved.approval(), agentos_types::Approval::Confirmed);
 }
 
 #[test]
+fn a_value_cannot_be_promoted_without_a_policy_halt_behind_it() {
+    let _counters = counters_guard();    // The hole this closes. `Disclosure::approve` used to take any `Val` and any
+    // `&self`, so a caller holding a tainted value could mint a `Trusted` from it
+    // with no host, no engine, no audit entry, and no user in the loop. That was
+    // harmless while nothing consumed a promoted value. It is not harmless the
+    // moment a resumed plan runs a tool with one, so the authority to promote is
+    // now something `Disclosure` has to have witnessed.
+    let sink = MemorySink::new();
+    let (spy, _calls) = Spy::new("send_email");
+    let mut host = host_with(Box::new(spy), &sink);
+
+    let disclosure = Disclosure::new(user(), &mut host);
+    assert!(
+        disclosure.approved_request().is_none(),
+        "nothing has been asked, so nothing can be approved"
+    );
+}
+
+#[test]
 fn a_confirmation_for_one_value_does_not_authorise_another() {
-    // This is the property that makes approval mean something. The Controller
+    let _counters = counters_guard();    // This is the property that makes approval mean something. The Controller
     // mints the token from what it displayed; if the value that reaches
     // `confirmed` differs by even one byte, the digest must refuse.
     let sink = MemorySink::new();
@@ -145,7 +192,7 @@ fn a_confirmation_for_one_value_does_not_authorise_another() {
 
 #[test]
 fn approval_from_one_user_does_not_carry_to_another() {
-    let sink = MemorySink::new();
+    let _counters = counters_guard();    let sink = MemorySink::new();
     let (spy, _calls) = Spy::new("send_email");
     let _host = host_with(Box::new(spy), &sink);
 
@@ -172,7 +219,7 @@ fn approval_from_one_user_does_not_carry_to_another() {
 
 #[test]
 fn a_refused_request_stops_the_drain() {
-    // One "no" must not be followed by a stream of further effects the user did
+    let _counters = counters_guard();    // One "no" must not be followed by a stream of further effects the user did
     // not agree to.
     let sink = MemorySink::new();
     let (spy, _calls) = Spy::new("send_email");
@@ -199,7 +246,7 @@ fn a_refused_request_stops_the_drain() {
 
 #[test]
 fn draining_twice_asks_nothing_the_second_time() {
-    let sink = MemorySink::new();
+    let _counters = counters_guard();    let sink = MemorySink::new();
     let (spy, _calls) = Spy::new("send_email");
     let mut host = host_with(Box::new(spy), &sink);
 
@@ -216,7 +263,7 @@ fn draining_twice_asks_nothing_the_second_time() {
 
 #[test]
 fn a_trusted_value_needs_no_disclosure_at_all() {
-    let sink = MemorySink::new();
+    let _counters = counters_guard();    let sink = MemorySink::new();
     let (spy, calls) = Spy::new("send_email");
     let mut host = host_with(Box::new(spy), &sink);
 
@@ -234,21 +281,84 @@ fn a_trusted_value_needs_no_disclosure_at_all() {
 
 #[test]
 fn a_promoted_value_records_who_vouched_for_it() {
-    // The approval record must survive so the audit log can say who confirmed.
+    let _counters = counters_guard();    // The approval record must survive so the audit log can say who confirmed.
     let sink = MemorySink::new();
     let (spy, _calls) = Spy::new("send_email");
     let mut host = host_with(Box::new(spy), &sink);
-    let disclosure = Disclosure::new(user(), &mut host);
+
+    let mut args = BTreeMap::new();
+    args.insert("to".to_string(), tainted_recipient(PAYLOAD));
+    let _ = host.call("send_email", &args);
+
+    let mut disclosure = Disclosure::new(user(), &mut host);
+    disclosure.drain(|_| true).unwrap();
+    let pending = disclosure.approved_request().unwrap();
 
     let v = tainted_recipient(PAYLOAD);
-    let t = disclosure.approve(&v).unwrap();
+    let t = disclosure.approve(pending, &v).unwrap();
     assert_eq!(t.origin(), agentos_types::Origin::User(user()));
     assert_eq!(t.approval(), agentos_types::Approval::Confirmed);
 }
 
 #[test]
+fn a_refused_request_authorises_nothing() {
+    let _counters = counters_guard();    // "The user said no" must not leave behind anything promotable. This is the
+    // negative counterpart to the halt-gating test: a caller must not be able to
+    // answer "no" during the drain and then promote anyway.
+    let sink = MemorySink::new();
+    let (spy, _calls) = Spy::new("send_email");
+    let mut host = host_with(Box::new(spy), &sink);
+
+    let mut args = BTreeMap::new();
+    args.insert("to".to_string(), tainted_recipient(PAYLOAD));
+    let _ = host.call("send_email", &args);
+
+    let mut disclosure = Disclosure::new(user(), &mut host);
+    let resolutions = disclosure.drain(|_| false).unwrap();
+    assert!(!resolutions[0].approved);
+    assert!(
+        disclosure.approved_request().is_none(),
+        "a refused request must not be promotable"
+    );
+}
+
+#[test]
+fn the_leak_report_observes_real_confirmations() {
+    let _counters = counters_guard();    // I1's report has confirmation counters that nothing in the workspace ever
+    // incremented, so they were structurally zero rather than measured zero.
+    // `Disclosure::drain` now records them, which is what makes the I1 gate
+    // meaningful for the confirmation path instead of vacuous.
+    //
+    // Serialised because `agentos_infer::leak`'s counters are a process-wide
+    // singleton by design and libtest shares a process.
+    agentos_infer::leak::reset();
+
+    let sink = MemorySink::new();
+    let (spy, _calls) = Spy::new("send_email");
+    let mut host = host_with(Box::new(spy), &sink);
+
+    let mut args = BTreeMap::new();
+    args.insert("to".to_string(), tainted_recipient(PAYLOAD));
+    let _ = host.call("send_email", &args);
+
+    let mut disclosure = Disclosure::new(user(), &mut host);
+    disclosure.drain(|_| true).unwrap();
+
+    let report = agentos_infer::leak::report();
+    agentos_infer::leak::reset();
+
+    assert_eq!(report.confirmations_requested, 1);
+    assert_eq!(report.confirmations_granted, 1);
+    assert_eq!(
+        report.leaks(),
+        0,
+        "asking a user about a tainted value is not a leak into a prompt"
+    );
+}
+
+#[test]
 fn disposition_reports_which_way_the_user_went() {
-    assert!(Disposition::Approved.is_approved());
+    let _counters = counters_guard();    assert!(Disposition::Approved.is_approved());
     assert!(!Disposition::Refused {
         op: "send_email.to".into()
     }

@@ -145,10 +145,22 @@ impl<'a> PromptSlot<'a> {
 
     /// Place text that is not a `Trusted<T>`.
     ///
-    /// Present only so the test suite can demonstrate that the counter notices.
-    /// A real caller cannot reach this with a tainted value from outside the
-    /// crate, because it would have to construct the `Trusted` first.
-    #[doc(hidden)]
+    /// Present only so this crate's own tests can demonstrate that the counter
+    /// notices a leak at all.
+    ///
+    /// `#[cfg(test)]`, and that is load-bearing rather than incidental. This used
+    /// to be `#[doc(hidden)] pub`, on the reasoning that "a real caller cannot
+    /// reach this with a tainted value from outside the crate, because it would
+    /// have to construct the `Trusted` first". That reasoning does not apply: the
+    /// function takes no value at all, so any dependent crate could call it in a
+    /// normal build and move the counter. Since `quarantined_prompt_fills` is
+    /// the I1 gate — the number that is supposed to be exactly zero — a public
+    /// footgun that increments it is not a testing convenience, it is a way to
+    /// make the gate report whatever is convenient.
+    ///
+    /// Compiled only for this crate's tests, so the one legitimate caller (the
+    /// forced-leak test below) still works and nothing else can reach it.
+    #[cfg(test)]
     pub fn fill_unchecked_for_test(&self) {
         COUNTERS.quarantined_prompt_fills.fetch_add(1, Ordering::Relaxed);
     }

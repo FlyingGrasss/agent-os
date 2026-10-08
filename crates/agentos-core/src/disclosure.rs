@@ -21,6 +21,7 @@
 //! property that makes confirmation mean something.
 
 use agentos_dsl::{PlanData, PlanError};
+use agentos_infer::leak::{record_confirmation_granted, record_confirmation_requested};
 use agentos_policy::ConfirmationRequest;
 use agentos_tools::{PendingConfirmation, PolicyHost};
 use agentos_types::{Confirmation, Trusted, UserId, Val};
@@ -50,16 +51,29 @@ impl Disposition {
 /// Resolves confirmation requests by asking a user.
 ///
 /// This is the privileged side of the boundary. Everything it is given comes
-/// from the halt that `PolicyHost` already enforced, so there is no path here
-/// that promotes a value without a preceding `Decision::Confirm`.
+/// from the halt that `PolicyHost` already enforced, and [`Self::approve`] now
+/// enforces that at the type level: a value can only be promoted against a
+/// request this `Disclosure` drained *and* the user approved, and the only way
+/// to reach those is a request the policy engine actually raised.
 pub struct Disclosure<'a> {
     user: UserId,
     host: &'a mut PolicyHost,
+    /// Requests the user said yes to, captured during [`Self::drain`].
+    ///
+    /// The authority to promote lives here rather than in the caller's hands.
+    /// That is the whole point: `Disclosure` is the only component that has seen
+    /// both a policy halt and a human decision, so it is the only place a
+    /// `Trusted` can honestly come from.
+    approved: Vec<PendingConfirmation>,
 }
 
 impl<'a> Disclosure<'a> {
     pub fn new(user: UserId, host: &'a mut PolicyHost) -> Self {
-        Self { user, host }
+        Self {
+            user,
+            host,
+            approved: Vec::new(),
+        }
     }
 
     /// Resolve every queued request, in order, asking `ask` for each.
@@ -76,7 +90,11 @@ impl<'a> Disclosure<'a> {
     {
         let mut resolutions = Vec::new();
         for pending in self.host.take_pending() {
+            record_confirmation_requested();
             let approved = ask(&pending.request);
+            if approved {
+                record_confirmation_granted();
+            }
             resolutions.push(Resolution {
                 op: pending.op.clone(),
                 approved,
@@ -84,6 +102,7 @@ impl<'a> Disclosure<'a> {
             if !approved {
                 return Ok(resolutions);
             }
+            self.approved.push(pending);
         }
         Ok(resolutions)
     }
@@ -94,7 +113,28 @@ impl<'a> Disclosure<'a> {
     /// caller displayed. If the caller displays one value and passes another,
     /// the digest check in `Trusted::confirmed` fails and this returns an error
     /// rather than promoting the wrong thing.
-    pub fn approve(&self, shown: &Val<PlanData>) -> Result<Trusted<PlanData>, PlanError> {
+    ///
+    /// `pending` must be a request this `Disclosure` drained and the user
+    /// approved. That argument is not decoration: it is what makes promotion
+    /// require a policy decision that put the value in a `Confirm` position.
+    /// Without it, any caller holding a tainted `Val` could mint a `Trusted` from
+    /// it — no host, no engine, no audit entry, no user — and that value would be
+    /// indistinguishable from an approved one everywhere downstream. Harmless
+    /// while nothing consumes a promoted value, which is the case today, and a
+    /// live hole the moment a resumed plan runs a tool with one.
+    pub fn approve(
+        &self,
+        pending: &PendingConfirmation,
+        shown: &Val<PlanData>,
+    ) -> Result<Trusted<PlanData>, PlanError> {
+        if !self.approved.iter().any(|p| p == pending) {
+            return Err(PlanError::ToolRejected {
+                tool: "confirmation".into(),
+                reason: "no approved request corresponds to this value: promotion requires a \
+                         request the policy engine raised and the user approved"
+                    .into(),
+            });
+        }
         let confirmation = Confirmation::issued_by_controller(self.user, shown)
             .map_err(|e| PlanError::ToolRejected {
                 tool: "confirmation".into(),
@@ -106,7 +146,18 @@ impl<'a> Disclosure<'a> {
         })
     }
 
-    pub fn user(&self) -> UserId {
+    /// The approved request a caller should promote against, if there is one.
+///
+/// A caller resuming a plan needs to know *which* halt the user's answer was to.
+/// Returning it here rather than making the caller reach into the host's drained
+/// queue is what ties the two together: the request comes from the same list
+/// `approve` checks against, so a caller cannot pair an approval with a different
+/// request.
+pub fn approved_request(&self) -> Option<&PendingConfirmation> {
+    self.approved.first()
+}
+
+pub fn user(&self) -> UserId {
         self.user
     }
 }

@@ -63,9 +63,13 @@ pub enum Origin {
 /// exists so that editing the digest input cannot silently drop the provenance
 /// binding.
 ///
-/// The mint point, [`Confirmation::new`], is `pub(crate)` and additionally
-/// `#[cfg(test)]`, so nothing outside this module can fabricate one and today
-/// nothing can at all.
+/// The mint point is [`Confirmation::issued_by_controller`], which is `pub`
+/// rather than crate-private — see its documentation for why, and for what
+/// actually enforces the binding. This paragraph used to claim a
+/// `Confirmation::new` that is `pub(crate)` and `#[cfg(test)]`; no such function
+/// exists, and the claim contradicted the prose directly below it. It mattered
+/// because designing the resume path against it implies `agentos-core` needs a
+/// new grant it does not need.
 pub struct Confirmation {
     user: UserId,
     digest: [u8; 32],

@@ -16,6 +16,7 @@ name = "agentos-core"
 version = "0.1.0"
 dependencies = [
  "agentos-dsl",
+ "agentos-infer",
  "agentos-policy",
  "agentos-tools",
  "agentos-types",

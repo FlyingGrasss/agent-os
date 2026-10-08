@@ -10,6 +10,11 @@ agentos-types = { workspace = true }
 agentos-dsl = { workspace = true }
 agentos-policy = { workspace = true }
 agentos-tools = { path = "../agentos-tools" }
+# For the leak counters. `Disclosure` is the only component that sees both a
+# policy halt and a human decision, so it is the only place a confirmation can be
+# counted; wiring the recorders here is what makes I1's report observe real
+# confirmations rather than only test doubles.
+agentos-infer = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
