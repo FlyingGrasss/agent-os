@@ -1,0 +1,25 @@
+[package]
+name = "agentos-quarantine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+agentos-types = { workspace = true }
+agentos-infer = { workspace = true }
+agentos-sandbox = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# The quarantine host spawns and confines a child process, which is Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+# The escape tests re-exec this test binary as the confined child and probe the
+# running kernel with raw syscalls (`socket(2)`, `kill(2)`, `prctl(2)`, `openat`),
+# so they assert on exactly which syscall was refused rather than on a std
+# wrapper's error message.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
