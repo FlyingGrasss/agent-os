@@ -250,20 +250,70 @@ repository is demonstrated, only argued.
 
 - [ ] **Attack success rate**, AgentDojo `v1.2` pinned, same model for both arms,
       ≥3 seeds. Note `security == True` means the **attack** succeeded, so lower
-      is better, and a context overflow scores as an attack success.
+      is better, and a context overflow scores as an attack success. **Blocked:**
+      there is no agent loop and no model backend, so there is no task to attack.
 - [ ] **Baseline is AgentDojo's own default pipeline**, not a hand-rolled agent.
       A hand-rolled baseline would differ in system prompt and tool schemas, and
-      the comparison would be worthless.
+      the comparison would be worthless. Same block.
 - [ ] **Label leak count**: untrusted values reaching a prompt slot. Target
       exactly 0. Immune to model behaviour, so it is the load-bearing internal
-      metric.
-- [ ] **Policy denied / would-allow counterfactual**: run each task with the
+      metric. The counter and the gate are built and `agentos-eval` runs it over
+      a 45-program corpus, but **no prompt assembly exists**, so it has still
+      never been incremented by a real task. Reporting 0 from a run that
+      assembles no prompts would be a vacuous pass.
+- [x] **Policy denied / would-allow counterfactual**: run each task with the
       engine armed and forced to `Allow`. This is the metric that does not
-      degenerate to 0 the way ASR does.
+      degenerate to 0 the way ASR does. **Measured** by `agentos-eval`; see below.
 - [ ] **Benign utility** within 10–15% of baseline, or an explicit justification.
-- [ ] **Sandbox escape tests** as a separate suite. Cannot be expressed as
-      prompt-injection tasks. **Built and passing** (Landlock escapes, seccomp
-      refusals, `SCM_RIGHTS` fd passing, the worker pool, and the quarantine
-      child's 18 escape tests), but not yet run as part of a scored evaluation,
-      so they are evidence of mechanism rather than of a result.
-- [ ] **Data-flow corruption corpus** (section 7.2), which AgentDojo lacks.
+- [x] **Sandbox escape tests** as a separate suite. Cannot be expressed as
+      prompt-injection tasks. Built and passing, and not yet part of a scored
+      evaluation, so they are evidence of mechanism rather than of a result.
+- [ ] **Data-flow corruption corpus** (section 7.2), which AgentDojo lacks. The
+      corpus now exists and is measured — see below — but only against the
+      policy, not against a model.
+
+### What the counterfactual measurement actually shows
+
+`agentos-eval` runs 45 DSL programs (12 benign controls, 33 attacks) through the
+real interpreter three times, changing only the rule set:
+
+| Arm | Rules | Attack success |
+|---|---|---|
+| counterfactual | every rule `Allow` | 29/33 |
+| user-approves | denials kept, everything else granted | 17/33 |
+| defended | the shipped `default_rules` | 0/33 |
+
+Every attack that no policy could have caught — the four resource-exhaustion
+programs, which the interpreter's step budget stops before any sink is reached —
+is excluded from the counterfactual denominator, because a control demanding
+those succeed would be demanding the budget be broken.
+
+**Read the 0% carefully.** It is a structural consequence of failing closed, not
+an empirical surprise: a tainted argument can only reach `Deny` or `Confirm`,
+because an absent rule is `Confirm`. What the 0% actually confirms is that the
+fail-closed default is intact and that the corpus really routes taint into tool
+arguments. The counterfactual control is what proves the latter.
+
+**The informative number is the split**, and it is not flattering:
+
+- **12 attacks** were refused outright with no question asked. All four
+  command-injection and all three path-injection attacks are here: attacker text
+  in a command or a path never reaches the user as a decision.
+- **17 attacks** were held only by a prompt the user answers. Every URL-injection
+  attack and every exfiltration attack is here, and **four of the five
+  data-poisoning attacks** are here.
+- **4 attacks** were stopped by the interpreter's step budget.
+
+That is the quantified form of §7.2 and §7.3. On command injection this design
+does not need the user at all. On data poisoning — the residual hole CaMeL's
+authors and AgentDojo's own authors both name — **four of five attacks survive a
+user who approves everything**, and our only defence is that the prompt appears
+at all. A figure like this is the argument for confirmation fatigue (7.3) being a
+security problem rather than a UX annoyance.
+
+The split is derived twice by independent routes — once by classifying each stop
+by the rule that produced it, once by subtracting the defended arm's successes
+from the user-approves arm's — and the harness fails if they disagree. That
+check earned its place: it caught a `split_once('.')` that was splitting
+`http.get.url` at the wrong dot, silently classifying every URL refusal as an
+automatic denial and understating the human-dependent figure.

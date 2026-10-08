@@ -4,14 +4,13 @@ Status against the original seven-phase roadmap. Checked boxes mean built **and*
 covered by a test that would fail if the property broke. Anything unchecked with
 a note means something was built but the phase's exit criterion is not met.
 
-Last updated to match commit `a5559c5`, which is the last commit that changed
-code.
+Last updated to match commit `a5559c5` plus the `agentos-eval` measurement crate.
 
 **Verification for this update:** `cargo test --workspace` and
-`cargo clippy --all-targets` both clean on Linux (`x86_64-unknown-linux-gnu`)
-and on the Windows host — 407 tests on Linux, 316 on Windows, zero failures,
-zero clippy warnings on either. The gap between the two counts is the Linux-only
-sandbox, quarantine, and seccomp suites.
+`cargo clippy --all-targets -- -D warnings` both clean on Linux
+(`x86_64-unknown-linux-gnu`) and on the Windows host — 427 tests on Linux, 336 on
+Windows, zero failures, zero clippy warnings on either. The gap between the two
+counts is the Linux-only sandbox, quarantine, and seccomp suites.
 
 ---
 
@@ -22,7 +21,7 @@ sandbox, quarantine, and seccomp suites.
 | I1 | No untrusted bytes in the Controller's prompt | **Partial** | `Trusted<T>` is a separate type, so prompt assembly accepts nothing else. `leak.rs` counts every slot fill and the gate is the count being exactly zero. Still partial: there is no end-to-end prompt assembly to run the counter over a real task. |
 | I2 | Extractor has no tools, network, or filesystem | **Done** | `agentos-quarantine`: `SandboxedExtractor` forks, applies Landlock, applies seccomp, and only then starts the engine. Demonstrated against a real kernel by 18 escape tests, not argued from configuration. |
 | I3 | Labels propagate through all operations | **Done** | `Val::map`/`zip`/`map_with_label`, interpreter's field/len/extract/iteration. 20,000-deep ASTs refused rather than overflowing the stack. `Label` has no `Default`, so a new ingest path cannot default to `Trusted` by omission. |
-| I4 | Sensitive args reject tainted unless confirmed | **Done** | `PolicyHost` resolves → evaluates → audits → acts only on `Allow`. The confirmation round trip is built. An absent rule is `Confirm`, never `Allow`. |
+| I4 | Sensitive args reject tainted unless confirmed | **Done** | `PolicyHost` resolves → evaluates → audits → acts only on `Allow`. The confirmation round trip is built. An absent rule is `Confirm`, never `Allow`. **Measured** over a 45-program corpus: 29/33 attacks succeed without the policy, 0/33 with it, and all 12 benign programs still run. |
 | I5 | Process sees only granted fds | **Partial** | Landlock confines paths; seccomp refuses `socket(2)`, UDP, and Unix sockets; `SCM_RIGHTS` passes real descriptors; `pool.rs` forks and confines once at construction so no request can be served by an unconfined process. Still open: cgroups and namespaces. |
 | I6 | Audit log, append-only, before execution | **Done** | `AuditLog::record_intent` returns an `AttemptToken` with private fields, so an effect cannot be performed without a prior durable record. |
 
@@ -33,7 +32,11 @@ sandbox, quarantine, and seccomp suites.
 - [x] Six invariants stated as testable properties (`AGENTS.md`)
 - [x] Evaluation harness wired to a backend trait (`agentos-infer`)
 - [x] **Threat model document** (`THREAT_MODEL.md`) — assets, boundaries, attacker capabilities, and what is explicitly not defended against
-- [ ] **Baseline numbers.** Attack success rate, task success rate, tokens per task, latency per tool call, bytes written per task. **Still none measured.** This is the largest single gap in the project.
+- [x] **Measurement harness** (`agentos-eval`): 45 DSL programs run through the real interpreter in three arms that differ only in the rule set, with controls that make a good-looking zero impossible to obtain by accident.
+- [x] **Policy denied / would-allow counterfactual** — the §9 obligation that could be met without a model, and now met. 29/33 attacks succeed against an engine that allows everything; 0/33 against the shipped rules; all 12 benign programs still run. The 0% is structural rather than surprising (fail-closed means a tainted argument can only reach Deny or Confirm), so the counterfactual control is what proves the corpus is genuinely adversarial rather than harmless.
+- [x] **Automatic-versus-human split**, which is the number worth having. 12 attacks refused outright with no human involved, **17 held only by a prompt**, 4 stopped by the interpreter's step budget. Every command- and path-injection attack is in the first group; **four of five data-poisoning attacks are in the second**. That is §7.2 quantified, and it is the strongest argument in the repository that confirmation fatigue is a security problem rather than a UX annoyance.
+- [ ] **Attack success rate against a real model.** **Still the largest single gap.** There is no agent loop and no model backend, so there is no task to attack; every number about model behaviour remains unmeasured.
+- [ ] Task success rate, tokens per task, latency per tool call — unmeasurable until there is a task loop
 - [ ] Naive flat-token agent to compare against
 - [ ] AgentDojo / InjecAgent corpus wired up
 
@@ -121,12 +124,14 @@ sandbox, quarantine, and seccomp suites.
 
 ## Known open risks
 
-1. **No measurement.** Every number in the evaluation matrix is unmeasured. Claims about reduced attack success rate are currently unfounded, and this is the risk that most undermines the rest: a system that cannot show an attack failing has not shown it is blocked.
-2. **No resource containment.** cgroups and namespaces are blocked on this host, so a confined process can exhaust CPU or memory. Landlock and seccomp control *reach*, not *cost*.
-3. **eBPF loading unverified** after the sysctl change.
-4. **The pool's confinement is Unix-only and its test image is a reference.** `agentos-worker` proves the mechanism; it is not the real interpreter. A different image may need loader syscalls the `Worker` profile does not grant, and the failure mode is a worker that cannot start rather than one that runs too freely — the safe direction, but still a deployment hazard.
-5. **`Profile::Worker` grants `prctl`.** It is safe as installed — the filter is already in place and can only be made more restrictive — but `prctl` is a broad syscall to hand out and the grant exists for a startup path that has not been pinned to the specific call.
-6. **The quarantine engine is a no-op.** I2 is demonstrated; the thing that will actually read documents is not built.
+1. **No model-shaped measurement.** The policy layer is now measured — 29/33 attacks succeed undefended, 0/33 defended, with the corpus verified adversarial by a control. But every number about *model behaviour* is still unmeasured, because there is no agent loop and no model backend. A system that cannot show an attack failing has not shown it is blocked, and this still applies to anything involving the model itself.
+2. **Most of the surviving defence is a human.** Of 33 attacks, 12 are refused automatically and **17 get through if the user approves everything**. On data poisoning — the residual hole both CaMeL's and AgentDojo's own authors name — four of five attacks survive an approving user. This makes confirmation fatigue a security property, not a usability one, and nothing in the design currently defends it.
+3. **No resource containment.** cgroups and namespaces are blocked on this host, so a confined process can exhaust CPU or memory. Landlock and seccomp control *reach*, not *cost*. The DSL's own step and loop budgets are the only bound, and the measurement shows they do fire.
+4. **eBPF loading unverified** after the sysctl change.
+5. **The pool's confinement is Unix-only and its test image is a reference.** `agentos-worker` proves the mechanism; it is not the real interpreter. A different image may need loader syscalls the `Worker` profile does not grant, and the failure mode is a worker that cannot start rather than one that runs too freely — the safe direction, but still a deployment hazard.
+6. **`Profile::Worker` grants `prctl`.** It is safe as installed — the filter is already in place and can only be made more restrictive — but `prctl` is a broad syscall to hand out and the grant exists for a startup path that has not been pinned to the specific call.
+7. **The quarantine engine is a no-op.** I2 is demonstrated; the thing that will actually read documents is not built.
+8. **A loop body in the DSL cannot bind a variable.** `Interp::exec` rejects a second `let` of the same name and a loop never unbinds, so a `for` body may contain only `report` and nested `for`s. Found while building the corpus. It is a real limitation rather than a security hole, but it makes loops nearly useless and it is why the corpus cannot express "one tainted write reached many times".
 
 ## Decisions taken
 
@@ -135,3 +140,5 @@ sandbox, quarantine, and seccomp suites.
 - **Untrusted text is never stored in the audit log.** A record is a Controller input; storing attacker prose there would reopen injection one layer over.
 - **Confinement happens before the engine starts, in a separate binary.** A model client that opened its socket before `landlock_restrict_self` would be holding a live socket in a process whose `socket(2)` is about to be denied.
 - **Workers compile everywhere and refuse at runtime.** A Windows build that needed a cfg in every dependent manifest would push someone toward deleting the dependency instead.
+- **Every measurement ships with a control that can make it fail.** The corpus ships with the claim that it defeats a defenceless agent, so a 0% defended rate cannot be obtained by measuring nothing. Three separate bugs in the harness itself were caught this way, including one that reported a *perfect* defence score because an `Rc::try_unwrap` was silently returning an empty execution list.
+- **Automatic refusal and human refusal are counted separately.** "0% attack success" is one number covering both "a machine refused this" and "a person was asked and said no"; reporting only the first would let the design claim credit for the user's attention.
