@@ -178,6 +178,50 @@ pub fn reset() {
 mod tests {
     use super::*;
     use agentos_types::{Confirmation, Origin, SourceId, UserId, Val};
+    use std::sync::Mutex;
+
+    /// Serialises every test that touches the counters.
+    ///
+    /// `COUNTERS` is a process-wide singleton on purpose (see `LeakCounters`),
+    /// but libtest runs tests on separate threads in one process. So any test
+    /// that resets and then asserts an exact count races with every other test
+    /// that increments the same atomics - `a_trusted_value_fills_a_slot_...`
+    /// alone moves `trusted_prompt_fills` from 0 to 1 without any reset. That
+    /// made `a_clean_run_reports_no_leaks` fail only under parallel execution,
+    /// which is the worst failure mode a test of this kind has: it looks like a
+    /// leak rather than like a race.
+    ///
+    /// Taking this lock is what makes `reset()` mean anything. Holding it does
+    /// not weaken any assertion: the property under test is what the counters
+    /// say about one controlled sequence, not what they say when several
+    /// sequences interleave.
+    static COUNTER_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Reset the counters, hold the lock, and restore zero on drop.
+    ///
+    /// Resetting on drop is what keeps a test from handing its final count to
+    /// whichever test happens to run next. The guard is a field rather than a
+    /// forgotten local so the lock is genuinely released when `self` drops.
+    struct Exclusive(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl Exclusive {
+        fn new() -> Self {
+            let guard = COUNTER_LOCK
+                .lock()
+                // A poisoned mutex means an earlier test panicked while holding
+                // it. The counters are still readable, so recover rather than
+                // cascade the panic into every unrelated test.
+                .unwrap_or_else(|e| e.into_inner());
+            reset();
+            Self(guard)
+        }
+    }
+
+    impl Drop for Exclusive {
+        fn drop(&mut self) {
+            reset();
+        }
+    }
 
     fn user() -> UserId {
         let mut b = [0u8; 16];
@@ -187,9 +231,15 @@ mod tests {
 
     #[test]
     fn a_trusted_value_fills_a_slot_without_incurring_a_leak() {
+        let _exclusive = Exclusive::new();
         let t = Trusted::inherited(Origin::User(user()), "read the invoice".to_string());
         let slot = PromptSlot::new("task");
         assert_eq!(slot.fill(&t), "read the invoice");
+        assert_eq!(report().leaks(), 0, "a trusted fill is not a leak");
+        assert_eq!(
+            report().trusted_prompt_fills, 1,
+            "a trusted fill is still recorded, so the counter is observing rather than inert"
+        );
     }
 
     #[test]
@@ -208,7 +258,7 @@ mod tests {
 
     #[test]
     fn the_counter_detects_a_leak_when_one_is_forced() {
-        reset();
+        let _exclusive = Exclusive::new();
         assert_eq!(report().leaks(), 0);
 
         PromptSlot::new("smuggled").fill_unchecked_for_test();
@@ -218,12 +268,11 @@ mod tests {
             1,
             "the counter must notice a quarantined value reaching a prompt"
         );
-        reset();
     }
 
     #[test]
     fn a_clean_run_reports_no_leaks() {
-        reset();
+        let _exclusive = Exclusive::new();
         record_untrusted_ingest();
         record_confirmation_requested();
         record_confirmation_granted();
@@ -236,7 +285,6 @@ mod tests {
         assert_eq!(r.untrusted_ingested, 1);
         assert_eq!(r.trusted_prompt_fills, 1);
         assert_eq!(r.leak_rate(), 0.0);
-        reset();
     }
 
     #[test]
