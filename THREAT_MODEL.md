@@ -61,13 +61,22 @@ by `Trusted<T>` being a distinct type, so the compiler rejects interpolation of
 tainted text into a prompt.
 
 **Boundary 2 — untrusted document to extractor.** Q reads hostile bytes. It has
-no tools and its output is structurally incapable of being free text that P can
-read. Enforced by `Quarantined<T>` plus typed extraction.
+no tools, no network, and no filesystem beyond the one descriptor it was handed,
+and its output is structurally incapable of being free text that P can read.
+Enforced in two places that had to be separate to be real: `Quarantined<T>` plus
+typed extraction on the host side, and an actual process boundary on the child
+side. Configuration alone would have been a claim; a forked, Landlock-confined,
+seccomp-filtered process is a demonstration.
 
 **Boundary 3 — interpreter to tool effect.** The policy engine's decision point.
 Everything above it is labelled; everything below it has happened.
 
-**Boundary 4 — process to host.** Landlock/seccomp/fd passing. Not yet built.
+**Boundary 4 — process to host.** Landlock confines the path graph, seccomp
+refuses everything outside the syscall allowlist, `SCM_RIGHTS` passes real
+descriptors, and the worker pool confines each process once at construction so
+no request can be served by an unconfined one. What this boundary does *not*
+do is bound cost: cgroups and namespaces are unavailable on this host, so a
+confined process can still exhaust CPU or memory.
 
 ### Why the extractor is not a boundary you can skip
 
@@ -107,8 +116,9 @@ would defeat this design. See section 7.
 
 | Surface | Attack | Defence | Tested |
 |---|---|---|---|
-| Web page → extractor | Instruction injection in page text | Extractor has no tools; output is typed | Yes |
-| Extractor → Controller | Hostile summary quoted back | `Quarantined<T>` unreadable to P | Yes |
+| Web page → extractor | Instruction injection in page text | The extractor runs in its own confined process and its output is typed | Yes |
+| Extractor → Controller | Hostile summary quoted back | `Quarantined<T>` unreadable to P; the value never crosses the process boundary as text | Yes |
+| Compromised extractor | Use the document descriptor to reach anything else | Landlock plus seccomp on the child; one descriptor, and no path to another | Yes |
 | Extractor field → tool arg | Poisoned `to`/`url`/`path` | Taint + policy `Deny`/`Confirm` | Yes |
 | Byte stream → label | Forge `{"label":"Trusted"}` | No `Deserialize`; `from_wire` always tainted | Yes |
 | Confirmation replay | Approve A, send B | Digest binds `(user, label, bytes)` | Yes |
@@ -117,22 +127,40 @@ would defeat this design. See section 7.
 | Parser | Construct the impossible | No `eval`, no recursion, no dynamic dispatch | Yes |
 | Audit log | Replay or rewrite | Append-only, `AttemptToken` has private fields | Yes |
 | Audit log | Poison the Controller via the log | Untrusted text never stored; fingerprint only | Yes |
-| Tool process | Read outside granted paths | Landlock/seccomp — **not built** | No |
+| Tool process | Read outside granted paths | Landlock on the path graph; seccomp on everything else | Yes |
+| Tool process | Reach a capability it was not handed | `SCM_RIGHTS` descriptor passing, and `open_granted` refuses `O_NOFOLLOW`/`O_DIRECTORY` violations | Yes |
+| Tool process | Be served unconfined | Workers are confined at pool construction; confinement is never per-request | Yes |
+| Tool process | Be replaced by a corpse that answers | `worker_is_dead` asks the kernel via `waitpid(WNOHANG)` | Yes |
+| `http.fetch` | Reach loopback, link-local, or a metadata service | Every record in the DNS answer is checked, and redirects are re-checked | Yes |
+| `http.fetch` | Be laundered through a redirect | A 302 to an address that did not pass the check is refused | Yes |
 | Too many sources | Many distinct tainted sources bloat labels | `BTreeSet` union; unbounded | No |
 
 ## 6. Invariants and their enforcement points
 
 | # | Invariant | Enforced by | Test |
 |---|---|---|---|
-| I1 | No untrusted bytes in the prompt | `Trusted<T>` distinct type; `report` refuses text; `Quarantined` Debug hides content | Partially — no prompt assembly exists yet |
-| I2 | Q has no tools/network/fs | Not built | No |
+| I1 | No untrusted bytes in the prompt | `Trusted<T>` distinct type; `report` refuses text; `Quarantined` Debug hides content; `leak.rs` counts every slot fill and gates on the count being zero | Partially — no prompt assembly exists yet, so the counter has never run over a real task |
+| I2 | Q has no tools/network/fs | `SandboxedExtractor`: fork → Landlock → seccomp → *then* start the engine, in a separate binary so that order is the only order there is | Yes, against a real kernel |
 | I3 | Labels propagate | `Val::map`/`zip`; interpreter field/len/extract/iteration | Yes |
 | I4 | Sensitive args reject tainted | `PolicyHost`: resolve → evaluate → audit → act on `Allow` only | Yes, at the boundary |
-| I5 | Process sees only granted fds | Not built | No |
+| I5 | Process sees only granted fds | Landlock + seccomp + `SCM_RIGHTS` + a pool that confines once at construction | Yes |
 | I6 | Audit before execution | `AttemptToken` private fields, so no effect without a prior record | Yes |
 
-I2 and I5 have no implementation and no test. I1 is enforced in the parts that
-exist but cannot be proven end-to-end until prompt assembly exists.
+I1 is the one that is still partial. Everything it needs is in place — the
+distinct type, the counter, and the gate — but there is no prompt assembly to
+run the counter over a real task, so it has never been observed at the scale
+where a leak would show up.
+
+Two qualifications on I5, both stated because they are the ways the property
+could be weaker than the table reads:
+
+- **The boundary is reach, not cost.** Nothing bounds CPU, memory, or pid count.
+- **The worker's seccomp profile had to be widened to let a dynamically linked
+  image start at all.** The minimum was found empirically rather than reasoned
+  out, and it is `poll`. Every grant in `loader_extras` is safe by the argument
+  that a loader syscall reaches no object, but that argument is an argument, not
+  a test. A `Worker` profile that is too narrow fails closed — the worker cannot
+  start — which is the safe direction, but it is a deployment hazard.
 
 ## 7. What this does NOT protect against
 
@@ -175,9 +203,18 @@ its honesty about what a document says.
 **7.7 Kernel or hypervisor compromise.** Out of scope. The sandbox assumes the
 kernel enforces Landlock and seccomp correctly.
 
-**7.8 Denial of service.** An attacker can make the agent slow, expensive, or
-unable to finish. Steps and loop counts are bounded; nothing bounds wall-clock,
-token spend, or the number of confirmations.
+**7.8 Denial of service, including from inside the sandbox.** An attacker can
+make the agent slow, expensive, or unable to finish. Steps and loop counts are
+bounded; nothing bounds wall-clock, token spend, or the number of
+confirmations.
+
+Worth separating from the rest, because it is a different kind of gap: a
+confined worker can still spin. Landlock and seccomp control what a process can
+*reach*, not what it can *cost*. The pool bounds how long a worker is reused and
+how many descriptors it may be holding, which is a lifetime bound, but with
+cgroups and namespaces unavailable on this host there is no CPU, memory, or pid
+limit at all. A hostile tool that forks nothing and simply computes can occupy a
+core indefinitely.
 
 **7.9 Side channels.** Timing, error messages, and resource usage leak
 information. Not modelled.
@@ -225,5 +262,8 @@ repository is demonstrated, only argued.
       degenerate to 0 the way ASR does.
 - [ ] **Benign utility** within 10–15% of baseline, or an explicit justification.
 - [ ] **Sandbox escape tests** as a separate suite. Cannot be expressed as
-      prompt-injection tasks.
+      prompt-injection tasks. **Built and passing** (Landlock escapes, seccomp
+      refusals, `SCM_RIGHTS` fd passing, the worker pool, and the quarantine
+      child's 18 escape tests), but not yet run as part of a scored evaluation,
+      so they are evidence of mechanism rather than of a result.
 - [ ] **Data-flow corruption corpus** (section 7.2), which AgentDojo lacks.
