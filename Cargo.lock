@@ -37,6 +37,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-eval"
+version = "0.1.0"
+dependencies = [
+ "agentos-dsl",
+ "agentos-infer",
+ "agentos-policy",
+ "agentos-tools",
+ "agentos-types",
+]
+
+[[package]]
 name = "agentos-events"
 version = "0.1.0"
 dependencies = [

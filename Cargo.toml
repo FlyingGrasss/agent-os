@@ -12,6 +12,7 @@ members = [
     "crates/agentos-events",
     "crates/agentos-cli",
     "crates/agentos-quarantine",
+    "crates/agentos-eval",
 ]
 
 [workspace.package]
@@ -29,6 +30,7 @@ agentos-infer = { path = "crates/agentos-infer" }
 agentos-sandbox = { path = "crates/agentos-sandbox" }
 agentos-tools = { path = "crates/agentos-tools" }
 agentos-quarantine = { path = "crates/agentos-quarantine" }
+agentos-eval = { path = "crates/agentos-eval" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

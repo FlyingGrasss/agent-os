@@ -1,0 +1,23 @@
+[package]
+name = "agentos-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+agentos-dsl = { workspace = true }
+agentos-infer = { workspace = true }
+agentos-policy = { workspace = true }
+agentos-tools = { workspace = true }
+agentos-types = { workspace = true }
+
+# The tests assert against the policy engine's rule set and the leak counter
+# directly, so those are test dependencies rather than only indirect ones.
+[dev-dependencies]
+agentos-policy = { workspace = true }
+agentos-infer = { workspace = true }
+
+[[bin]]
+name = "agentos-eval"
+path = "src/bin/agentos-eval.rs"
