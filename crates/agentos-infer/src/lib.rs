@@ -20,8 +20,16 @@ pub mod leak;
 /// Extraction schemas, which are the real boundary for role Q.
 pub mod schema;
 
+/// A local Ollama backend. See the module for why it exists and what it does not
+/// claim.
+#[cfg(feature = "ollama")]
+pub mod ollama;
+
 pub use leak::{LeakReport, PromptSlot};
 pub use schema::{Constraint, Field, Schema, SchemaRegistry, ValidationError};
+
+#[cfg(feature = "ollama")]
+pub use ollama::{Ollama, RoleModels, DEFAULT_ENDPOINT as OLLAMA_ENDPOINT};
 
 /// Which model role is being invoked.
 ///

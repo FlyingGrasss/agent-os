@@ -16,3 +16,11 @@ thiserror = { workspace = true }
 # the session.
 [dev-dependencies]
 uuid = { workspace = true }
+
+[features]
+default = []
+# The Ollama backend. Off by default so a portable build pulls in neither an HTTP
+# stack nor anything else a local-model client might pull in. The client itself is
+# hand-rolled over `std::net::TcpStream` for the same reason, so enabling this
+# adds no dependencies at all.
+ollama = []
