@@ -6,7 +6,7 @@
 //! unexpected", and none of them need a real 2 GB model to exercise: a truncated
 //! planner reply, a non-JSON extractor reply, a 500 with an error body, a
 //! connection refused. Testing those against a live model would make the suite
-//! slow, non-deterministic, and dependent on a multi-gigabyte download â€” which is
+//! slow, non-deterministic, and dependent on a multi-gigabyte download — which is
 //! the standard way a test suite quietly stops being run.
 //!
 //! So the tests bind a real `TcpListener` on loopback and speak the real HTTP
@@ -203,7 +203,7 @@ fn an_unreachable_server_says_so() {
 
 /// Role Q is refused unless a schema was supplied.
 ///
-/// The dangerous failure here is not a crash â€” it is serving role Q with no
+/// The dangerous failure here is not a crash — it is serving role Q with no
 /// grammar and reporting success, which would satisfy "supports constrained
 /// decoding" while removing the boundary it exists to provide.
 #[test]
@@ -537,7 +537,7 @@ fn usage_is_reported_from_the_server() {
 ///
 /// The positive half: role Q's prompt *must* contain the hostile bytes, or the
 /// extractor is not doing its job. The negative half: a planner prompt can never
-/// contain them, because `Conversation::push` refuses such a message â€” so this
+/// contain them, because `Conversation::push` refuses such a message — so this
 /// is asserted through the conversation rather than through the client.
 #[test]
 fn quarantined_text_reaches_the_wire_only_for_the_extractor() {

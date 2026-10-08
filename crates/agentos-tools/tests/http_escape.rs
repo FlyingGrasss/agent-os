@@ -122,6 +122,13 @@ impl Transport for FakeTransport {
     }
 }
 
+/// The user these tests act for. Fixed bytes so nothing depends on randomness.
+fn user() -> agentos_types::UserId {
+    let mut b = [0u8; 16];
+    b[15] = 1;
+    agentos_types::UserId(uuid::Uuid::from_bytes(b))
+}
+
 fn ok_response(body: &str) -> RawResponse {
     RawResponse {
         status: 200,
@@ -200,6 +207,7 @@ fn host_with(
     let mut host = PolicyHost::new(
         engine_with_http_rules(),
         AuditLog::new(Box::new(sink.clone()), Box::new(SystemClock)),
+        user(),
     );
     host.register(Box::new(HttpFetch::with_parts(
         grant,
@@ -1002,6 +1010,7 @@ fn without_the_installed_rules_a_tainted_url_halts_rather_than_fetching() {
     let mut host = PolicyHost::new(
         PolicyEngine::new(PolicyEngine::default_rules()),
         AuditLog::new(Box::new(sink.clone()), Box::new(SystemClock)),
+        user(),
     );
     host.register(Box::new(HttpFetch::with_parts(
         grant(&["good.test"]),

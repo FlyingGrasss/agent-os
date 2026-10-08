@@ -21,9 +21,17 @@ use std::collections::BTreeMap;
 
 use agentos_dsl::{PlanData, PlanError, PlanValue, ToolHost};
 use agentos_policy::{ArgView, ConfirmationRequest, Decision, PolicyEngine};
-use agentos_types::Val;
+use agentos_types::{approval_key, UserId, Val};
 
 use crate::audit::{ArgumentRecord, AuditLog, AttemptToken, OutcomeKind, PolicySummary};
+
+/// Why an approval could not be recorded.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GrantError {
+    /// The value could not be encoded for hashing.
+    #[error("value could not be encoded for approval: {0}")]
+    Encoding(String),
+}
 
 /// A tool the host is willing to run.
 ///
@@ -53,6 +61,18 @@ pub struct PolicyHost {
     /// the host keeps the dependency pointing the right way while still making
     /// the halt observable: the call returns an error, so the plan stops.
     pending: Vec<PendingConfirmation>,
+    /// Single-use approvals, by `(scope, key)`.
+    ///
+    /// See [`Self::grant`] for why a resumed plan needs these and why they are
+    /// consumed rather than remembered.
+    grants: std::collections::HashMap<(String, [u8; 32]), ()>,
+    /// The user this session acts for.
+    ///
+    /// Part of the host rather than a parameter to `grant`, because the key has to
+    /// be checked on *every* call and threading a user through the interpreter
+    /// would put an identity in the pure evaluator. A host serves one session for
+    /// one user.
+    user: UserId,
 }
 
 /// A halted call awaiting a user's decision.
@@ -63,12 +83,103 @@ pub struct PendingConfirmation {
 }
 
 impl PolicyHost {
-    pub fn new(engine: PolicyEngine, audit: AuditLog) -> Self {
+    pub fn new(engine: PolicyEngine, audit: AuditLog, user: UserId) -> Self {
         Self {
             engine,
             tools: BTreeMap::new(),
             audit,
             pending: Vec::new(),
+            grants: std::collections::HashMap::new(),
+            user,
+        }
+    }
+
+    /// Record that `user` approved exactly `value` in the position `scope`.
+    ///
+    /// ## Why this exists
+    ///
+    /// A plan halts when the engine says `Confirm`. When the plan resumes, it
+    /// re-enters this host with the *same* tainted value it halted on, and the
+    /// engine says `Confirm` again. Without something marking that value as
+    /// already-decided, the plan halts forever and the user is asked the same
+    /// question on every attempt.
+    ///
+    /// ## Why the grant is scoped and single-use
+    ///
+    /// **Scoped.** The key binds `(tool.arg, user, label, bytes)`. A user who
+    /// approved `payee@x.test` as `send_email.to` has not approved it as
+    /// `send_email.reply_to`, and two byte-identical arguments must not share one
+    /// approval.
+    ///
+    /// **Single-use.** Consumed by the first call it authorises. A grant that
+    /// persisted would authorise every later identical call in the session, which
+    /// turns one approval into a standing capability — the precise confusion I4
+    /// exists to prevent.
+    ///
+    /// ## Why the decision stays here
+    ///
+    /// Granting lives on the host rather than in the interpreter because the host
+    /// is where I4 is enforced. The interpreter is a pure evaluator holding no
+    /// secrets; putting an authorisation there would be the first time it held
+    /// one.
+    pub fn grant(
+        &mut self,
+        scope: &str,
+        value: &Val<PlanData>,
+    ) -> Result<(), GrantError> {
+        let key = approval_key(scope, self.user, value)
+            .map_err(|e| GrantError::Encoding(e.to_string()))?;
+        self.grants.insert((scope.to_string(), key), ());
+        Ok(())
+    }
+
+    /// Whether every argument the engine flagged for confirmation carries an
+    /// unspent approval.
+    ///
+    /// All of them, not any of them. A request listing two tainted arguments with
+    /// an approval for one is still a question, because the user has not seen the
+    /// other — and a partial approval that let the call through would be the same
+    /// confusion `Disclosure::approve` is gated to prevent, reached by a
+    /// different route.
+    ///
+    /// The tainted arguments are taken from the engine's own `request.items`, not
+    /// recomputed here, so this cannot disagree with what was actually asked. A
+    /// view the engine could not read (an opaque record or list) is not in `items`
+    /// and so needs no grant — but it also could not have been confirmed, so the
+    /// engine would have denied it earlier and this is never reached.
+    fn confirm_is_fully_granted(
+        &self,
+        request: &ConfirmationRequest,
+        args: &BTreeMap<String, PlanValue>,
+        views: &BTreeMap<String, ArgView<'_>>,
+    ) -> bool {
+        if request.items.is_empty() {
+            return true;
+        }
+        request.items.iter().all(|item| {
+            let Some(value) = args.get(&item.arg) else {
+                return false;
+            };
+            // The view must be one the engine actually saw as tainted, so a grant
+            // cannot be planted against an argument the engine would have skipped.
+            let was_tainted = views.get(&item.arg).is_some_and(|v| v.is_tainted());
+            was_tainted && self.is_granted(&format!("{}.{}", request.tool, item.arg), value)
+        })
+    }
+
+    /// Whether `scope`/`value` currently carries an unspent approval.
+    fn is_granted(&self, scope: &str, value: &Val<PlanData>) -> bool {
+        match approval_key(scope, self.user, value) {
+            Ok(key) => self.grants.contains_key(&(scope.to_string(), key)),
+            Err(_) => false,
+        }
+    }
+
+    /// Spend an approval, returning whether one was there.
+    fn spend_grant(&mut self, scope: &str, value: &Val<PlanData>) -> bool {
+        match approval_key(scope, self.user, value) {
+            Ok(key) => self.grants.remove(&(scope.to_string(), key)).is_some(),
+            Err(_) => false,
         }
     }
 
@@ -153,7 +264,38 @@ impl ToolHost for PolicyHost {
 
         // 2. Evaluate. Views carry labels, so the engine cannot be handed a
         //    value whose provenance was dropped on the way here.
-        let decision = self.engine.evaluate(tool, &Self::views(args));
+        let all_views = Self::views(args);
+        let decision = self.engine.evaluate(tool, &all_views);
+
+        // A grant answers exactly one question: "did the user approve this?". It
+        // is therefore consulted *after* evaluation and *only* on `Confirm`.
+        //
+        // The earlier version of this excluded granted arguments from the views
+        // before evaluating, which is the obvious implementation and is a hole:
+        // a granted `shell.cmd` left the view map empty, the engine had nothing
+        // to classify and returned `Allow`, and the guardrail was gone. The
+        // test `a_grant_cannot_override_a_deny` caught it. A `Deny` is not a
+        // question anybody was asked, so there is no approval to replay, and it
+        // must survive any grant.
+        let mut spent: Vec<(String, Val<PlanData>)> = Vec::new();
+        let decision = match decision {
+            Decision::Confirm { request } => {
+                if self.confirm_is_fully_granted(&request, args, &all_views) {
+                    for item in &request.items {
+                        if let Some(value) = args.get(&item.arg) {
+                            spent.push((
+                                format!("{tool}.{}", item.arg),
+                                value.clone(),
+                            ));
+                        }
+                    }
+                    Decision::Allow
+                } else {
+                    Decision::Confirm { request }
+                }
+            }
+            other => other,
+        };
         let summary = match &decision {
             Decision::Allow => PolicySummary::Allowed,
             Decision::Confirm { .. } => PolicySummary::NeedsConfirmation,
@@ -198,6 +340,11 @@ impl ToolHost for PolicyHost {
                 Err(PlanError::ConfirmationRequired { op })
             }
             Decision::Allow => {
+                // Spend the approvals that made this call possible, and only now.
+                // Spending earlier would burn them on a call that then failed.
+                for (scope, value) in &spent {
+                    self.spend_grant(scope, value);
+                }
                 let result = self
                     .tools
                     .get_mut(tool)

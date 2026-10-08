@@ -1,4 +1,4 @@
-﻿//! Tests for invariant I4 at the real tool boundary.
+//! Tests for invariant I4 at the real tool boundary.
 //!
 //! These exist because the earlier tests proved the wrong thing. They showed
 //! the policy engine reaches the right verdict and showed the interpreter
@@ -54,6 +54,13 @@ impl Tool for Spy {
     }
 }
 
+/// The user these tests act for. Fixed bytes so nothing depends on randomness.
+fn user() -> agentos_types::UserId {
+    let mut b = [0u8; 16];
+    b[15] = 1;
+    agentos_types::UserId(uuid::Uuid::from_bytes(b))
+}
+
 fn ok_value() -> PlanValue {
     agentos_types::Val::trusted(PlanData::Bool(true))
 }
@@ -80,6 +87,7 @@ fn host_with(tool: Box<dyn Tool>, sink: &MemorySink) -> PolicyHost {
     let mut host = PolicyHost::new(
         PolicyEngine::new(PolicyEngine::default_rules()),
         AuditLog::new(Box::new(sink.clone()), Box::new(SystemClock)),
+        user(),
     );
     host.register(tool);
     host
@@ -188,6 +196,7 @@ fn an_unknown_tool_is_refused_and_nothing_runs() {
     let mut host = PolicyHost::new(
         PolicyEngine::new(PolicyEngine::default_rules()),
         AuditLog::new(Box::new(sink.clone()), Box::new(SystemClock)),
+        user(),
     );
 
     let err = host.call("rm_rf_slash", &BTreeMap::new()).unwrap_err();
@@ -384,6 +393,7 @@ fn fs_host(grant: WriteGrant, sink: &MemorySink) -> PolicyHost {
     let mut host = PolicyHost::new(
         PolicyEngine::new(PolicyEngine::default_rules()),
         AuditLog::new(Box::new(sink.clone()), Box::new(SystemClock)),
+        user(),
     );
     host.register(Box::new(FsWrite::new(grant)));
     host

@@ -16,3 +16,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 schemars = { workspace = true }
+
+# A `PolicyHost` names the user it acts for, so tests need to construct one. The
+# id is built from a fixed byte pattern so the tests do not depend on randomness.
+[dev-dependencies]
+uuid = { workspace = true }

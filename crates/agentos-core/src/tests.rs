@@ -72,6 +72,7 @@ fn host_with(tool: Box<dyn Tool>, sink: &MemorySink) -> PolicyHost {
     let mut host = PolicyHost::new(
         PolicyEngine::new(PolicyEngine::default_rules()),
         AuditLog::new(Box::new(sink.clone()), Box::new(SystemClock)),
+        user(),
     );
     host.register(tool);
     host
@@ -85,7 +86,7 @@ fn host_with(tool: Box<dyn Tool>, sink: &MemorySink) -> PolicyHost {
 /// test here holds this, not just the ones that read the counters, because a test
 /// that only *writes* them is enough to break a neighbour's exact count.
 ///
-/// This is the second time this workspace has hit that trap â€” `agentos-infer`'s
+/// This is the second time this workspace has hit that trap — `agentos-infer`'s
 /// own leak tests had the same shape and the same bug.
 fn counters_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

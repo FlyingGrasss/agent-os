@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 agentos-dsl = { workspace = true }
 agentos-infer = { workspace = true }
+uuid = { workspace = true }
 agentos-policy = { workspace = true }
 agentos-tools = { workspace = true }
 agentos-types = { workspace = true }
@@ -17,6 +18,7 @@ agentos-types = { workspace = true }
 [dev-dependencies]
 agentos-policy = { workspace = true }
 agentos-infer = { workspace = true }
+uuid = { workspace = true }
 
 [[bin]]
 name = "agentos-eval"

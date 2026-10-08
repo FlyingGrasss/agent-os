@@ -106,6 +106,13 @@ impl Drop for Scratch {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// The user these tests act for. Fixed bytes so nothing depends on randomness.
+fn user() -> agentos_types::UserId {
+    let mut b = [0u8; 16];
+    b[15] = 1;
+    agentos_types::UserId(uuid::Uuid::from_bytes(b))
+}
+
 fn trusted(text: &str) -> PlanValue {
     agentos_types::Val::trusted(PlanData::Str(text.to_string()))
 }
@@ -127,6 +134,7 @@ fn host_with(grant: WriteGrant, sink: &MemorySink) -> PolicyHost {
     let mut host = PolicyHost::new(
         PolicyEngine::new(PolicyEngine::default_rules()),
         AuditLog::new(Box::new(sink.clone()), Box::new(SystemClock)),
+        user(),
     );
     host.register(Box::new(FsWrite::new(grant)));
     host

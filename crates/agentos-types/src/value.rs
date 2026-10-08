@@ -147,6 +147,50 @@ impl Confirmation {
     }
 }
 
+/// A stable key identifying one `(scope, user, value)` triple, for a caller that
+/// needs to remember an approval across a boundary.
+///
+/// ## Why this exists
+///
+/// A resumed plan re-enters the policy engine with the *same* tainted value it was
+/// halted on. Without something to mark that value as already-approved, the engine
+/// would return `Confirm` again and the plan would halt forever, asking the user
+/// the same question on every attempt.
+///
+/// ## Why `scope` is part of the key
+///
+/// The obvious implementation keys on `(user, value)`. That is wrong. A user who
+/// approved mailing `payee@x.test` as `send_email.to` has not approved mailing it
+/// as `send_email.reply_to`, and if two arguments happen to carry byte-identical
+/// text a value-only key would let one approval authorise both. So the key binds
+/// the *position* as well as the bytes.
+///
+/// ## Why it is domain-separated from [`confirmation_digest`]
+///
+/// Different prefix, so a grant key can never be replayed as a confirmation
+/// digest or the reverse. Sharing the input would mean a value hashed for one
+/// purpose could satisfy the check for the other.
+pub fn approval_key<T: Serialize>(
+    scope: &str,
+    user: UserId,
+    val: &Val<T>,
+) -> Result<[u8; 32], ConfirmationError> {
+    let label = serde_json::to_string(val.label())
+        .map_err(|e| ConfirmationError::Encoding(e.to_string()))?;
+    let inner = serde_json::to_string(&val.inner)
+        .map_err(|e| ConfirmationError::Encoding(e.to_string()))?;
+    let mut h = Sha256::new();
+    h.update(b"agentos/approval-key/v1\0");
+    h.update(scope.as_bytes());
+    h.update(b"\0");
+    h.update(user.0.as_bytes());
+    h.update(b"\0");
+    h.update(label.as_bytes());
+    h.update(b"\0");
+    h.update(inner.as_bytes());
+    Ok(h.finish())
+}
+
 /// Digest binding a confirmation to `(user, label, bytes)`, with each part
 /// domain-separated so that no two different tuples can produce the same input.
 fn confirmation_digest<T: Serialize>(

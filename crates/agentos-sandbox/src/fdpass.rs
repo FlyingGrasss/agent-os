@@ -25,7 +25,7 @@
 //! ## Everything here is Linux
 //!
 //! `SCM_RIGHTS` is a Unix socket feature. Off Linux the module exposes the
-//! portable parts â€” opening a granted file safely, and the identity check â€” and
+//! portable parts — opening a granted file safely, and the identity check — and
 //! the send/receive side is compiled away.
 
 use std::io;

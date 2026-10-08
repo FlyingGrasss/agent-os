@@ -14,8 +14,8 @@ pub use capability::{Cap, CapId, CapKind, CapRegistry, CapabilityError};
 pub use event::{Event, EventId};
 pub use provenance::{Label, SourceId, SourceKind};
 pub use value::{
-    Approval, Confirmation, ConfirmationError, ControllerAuthority, Origin, Quarantined,
-    TaintError, Trusted, Val,
+    approval_key, Approval, Confirmation, ConfirmationError, ControllerAuthority, Origin,
+    Quarantined, TaintError, Trusted, Val,
 };
 
 /// A value produced by the trusted user, never by an untrusted source.

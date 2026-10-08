@@ -223,6 +223,13 @@ impl Tool for Probe {
 /// typed, which is the schema-driven shape the design asks for.
 struct HostileInvoice;
 
+/// The user these tests act for. Fixed bytes so nothing depends on randomness.
+fn user() -> agentos_types::UserId {
+    let mut b = [0u8; 16];
+    b[15] = 1;
+    agentos_types::UserId(uuid::Uuid::from_bytes(b))
+}
+
 fn field_of(document: &PlanData, key: &str) -> Option<String> {
     let text = match document {
         PlanData::Quoted { text, .. } => text.as_str(),
@@ -414,6 +421,7 @@ pub fn observe(source: &str, engine: PolicyEngine) -> Observation {
     let mut host = PolicyHost::new(
         engine,
         AuditLog::new(Box::new(MemorySink::new()), Box::new(SystemClock)),
+        user(),
     );
     for spec in TOOLS.iter() {
         host.register(Box::new(Probe { spec, log: log.clone() }));
