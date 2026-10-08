@@ -13,6 +13,7 @@
 
 pub mod audit;
 pub mod fswrite;
+pub mod http;
 pub mod host;
 #[cfg(test)]
 mod tests;
@@ -26,5 +27,14 @@ pub use audit::{
 pub use fswrite::{
     FsWrite, LabelledArgs, WriteArgs, WriteError, WriteGrant, WriteReceipt, ARG_CONTENTS,
     ARG_PATH, TOOL_NAME,
+};
+// `http::TOOL_NAME` is deliberately not re-exported at the crate root: it would
+// collide with `fswrite::TOOL_NAME`, which is already exported there under that
+// name. Reach it as `agentos_tools::http::TOOL_NAME`, and `ARG_URL` is unique
+// enough to be lifted.
+pub use http::{
+    address_is_routable, install_policy_rules, FetchError, FetchGrant, FetchRequest,
+    FetchUrl, FetchUrlArgs, Fetched, HttpFetch, LabelledFetchArgs, Limits, RawResponse, Resolver,
+    SystemResolver, TcpTransport, Transport, ARG_URL, DEFAULT_MAX_BYTES, MAX_URL_LEN,
 };
 pub use host::{PendingConfirmation, PolicyHost, Tool};

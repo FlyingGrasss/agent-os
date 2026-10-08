@@ -11,6 +11,7 @@ members = [
     "crates/agentos-tools",
     "crates/agentos-events",
     "crates/agentos-cli",
+    "crates/agentos-quarantine",
 ]
 
 [workspace.package]
@@ -23,6 +24,11 @@ license = "Apache-2.0"
 agentos-types = { path = "crates/agentos-types" }
 agentos-dsl = { path = "crates/agentos-dsl" }
 agentos-policy = { path = "crates/agentos-policy" }
+agentos-core = { path = "crates/agentos-core" }
+agentos-infer = { path = "crates/agentos-infer" }
+agentos-sandbox = { path = "crates/agentos-sandbox" }
+agentos-tools = { path = "crates/agentos-tools" }
+agentos-quarantine = { path = "crates/agentos-quarantine" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,3 +41,4 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+

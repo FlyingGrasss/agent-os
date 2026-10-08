@@ -356,7 +356,7 @@ fn a_symlink_inside_the_grant_pointing_outside_is_refused_and_its_target_is_unto
     // Control on the control: the file the symlink points *from* still exists and
     // is still the file the symlink names, so the target assertion above is
     // about the right file.
-    assert!(symlink_metadata(&s.sibling_target()).is_ok());
+    assert!(symlink_metadata(s.sibling_target()).is_ok());
 }
 
 // ---------------------------------------------------------------------------

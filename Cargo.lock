@@ -78,6 +78,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-quarantine"
+version = "0.1.0"
+dependencies = [
+ "agentos-infer",
+ "agentos-sandbox",
+ "agentos-types",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "agentos-sandbox"
 version = "0.1.0"
 dependencies = [
