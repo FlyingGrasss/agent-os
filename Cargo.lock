@@ -47,6 +47,8 @@ dependencies = [
  "agentos-policy",
  "agentos-tools",
  "agentos-types",
+ "serde_json",
+ "thiserror",
  "uuid",
 ]
 

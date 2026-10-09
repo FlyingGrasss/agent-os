@@ -13,6 +13,8 @@ agentos-policy = { workspace = true }
 agentos-tools = { workspace = true }
 agentos-core = { workspace = true }
 agentos-types = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 # The tests assert against the policy engine's rule set and the leak counter
 # directly, so those are test dependencies rather than only indirect ones.
@@ -24,3 +26,14 @@ uuid = { workspace = true }
 [[bin]]
 name = "agentos-eval"
 path = "src/bin/agentos-eval.rs"
+
+# The model arm needs a live Ollama server. The `ollama` feature adds no
+# dependencies -- the client is hand-rolled over `TcpStream` -- so enabling it
+# here costs nothing for anyone who only wants `agentos-eval`.
+[[bin]]
+name = "agentos-model-eval"
+path = "src/bin/agentos-model-eval.rs"
+required-features = ["ollama"]
+
+[features]
+ollama = ["agentos-infer/ollama"]

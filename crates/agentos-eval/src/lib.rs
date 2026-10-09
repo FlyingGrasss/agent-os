@@ -45,6 +45,7 @@
 pub mod metrics;
 pub mod rig;
 pub mod corpus;
+pub mod model;
 
 pub use corpus::{Category, Kind, Program, CORPUS};
 pub use metrics::{ArmResult, Measurement};
