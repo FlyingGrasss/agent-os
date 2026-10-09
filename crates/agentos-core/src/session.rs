@@ -161,16 +161,10 @@ impl<'a> Session<'a> {
                     if self.asked >= self.confirmation_limit {
                         return Ok(Outcome::ConfirmationLimit { asked: self.asked });
                     }
-                    if !self.resolve(&mut ask)? {
+                    if let Some(op) = self.resolve(&mut ask)? {
                         // The user said no. Returned rather than resumed: a plan
                         // that continues past a refusal would be a plan acting
                         // against an answer it was given.
-                        let op = self
-                            .host
-                            .take_pending()
-                            .first()
-                            .map(|p| p.op.clone())
-                            .unwrap_or_else(|| "unknown".into());
                         return Ok(Outcome::Refused { op });
                     }
                 }
@@ -184,10 +178,14 @@ impl<'a> Session<'a> {
 
     /// Ask about everything currently pending, and grant it if approved.
     ///
-    /// Returns whether the session may continue. The `Disclosure` is scoped so
-    /// its borrow of the host ends before the grants are written, which is why
-    /// this is a method taking `ask` rather than code inlined at the call site.
-    fn resolve<F>(&mut self, ask: &mut F) -> Result<bool, PlanError>
+    /// Returns the `op` the user refused, or `None` if the session may continue.
+    ///
+    /// The refused `op` comes back from here rather than being re-read off the
+    /// host afterwards. `drain` empties the host's queue as it goes, so a second
+    /// `take_pending()` finds nothing and every refusal would be reported as
+    /// `unknown` — a small lie, but the kind that makes a refusal unattributable
+    /// in exactly the log where attribution is the point.
+    fn resolve<F>(&mut self, ask: &mut F) -> Result<Option<String>, PlanError>
     where
         F: FnMut(&ConfirmationRequest) -> bool,
     {
@@ -195,8 +193,8 @@ impl<'a> Session<'a> {
             let mut disclosure = Disclosure::new(self.user, self.host);
             self.asked += 1;
             let resolutions = disclosure.drain(ask)?;
-            if resolutions.iter().any(|r| !r.approved) {
-                return Ok(false);
+            if let Some(refused) = resolutions.iter().find(|r| !r.approved) {
+                return Ok(Some(refused.op.clone()));
             }
             disclosure.approved().to_vec()
         };
@@ -209,6 +207,6 @@ impl<'a> Session<'a> {
                 }
             })?;
         }
-        Ok(true)
+        Ok(None)
     }
 }

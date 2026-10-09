@@ -23,3 +23,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 # The session tests build a `UserId` directly, the same way the eval rig does.
 uuid = { workspace = true }
+# The live end-to-end test needs a real model. Gated behind the same `ollama`
+# feature as the rest of the repository, so a default build pulls no HTTP client
+# and the live tests stay opt-in.
+agentos-infer = { workspace = true, features = ["ollama"] }

@@ -223,6 +223,36 @@ fn a_refused_call_does_not_run_and_the_plan_does_not_resume() {
     );
 }
 
+/// A refusal names the operation it refused.
+///
+/// Found by a live run reporting `Refused { op: "unknown" }`: the session drained
+/// the host's queue to ask the question and then read it again to find out what it
+/// had asked about, by which time it was empty. A refusal record that does not
+/// say what was refused is unattributable in exactly the log where attribution is
+/// the whole point.
+#[test]
+fn a_refusal_names_the_operation_it_refused() {
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let mut host = host_with(&log, rules());
+    let mut ex = Invoices;
+    let mut session = Session::new(user(), &mut host);
+
+    let outcome = session
+        .run(&parse(ATTACK).expect("parses"), &mut ex, |_| false)
+        .expect("runs");
+
+    match outcome {
+        Outcome::Refused { op } => {
+            assert_eq!(
+                op, "send_email.to",
+                "the refusal must name the operation the user declined, not a placeholder"
+            );
+            assert_ne!(op, "unknown");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
 /// A denial is not a question, so a user saying yes cannot unlock it.
 #[test]
 fn a_user_cannot_approve_what_policy_denied() {
