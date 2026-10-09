@@ -41,6 +41,7 @@ dependencies = [
 name = "agentos-eval"
 version = "0.1.0"
 dependencies = [
+ "agentos-core",
  "agentos-dsl",
  "agentos-infer",
  "agentos-policy",
