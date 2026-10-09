@@ -144,6 +144,8 @@ fn folding_unplannable_into_blocked_is_detected() {
         unplannable_ids: vec!["a", "b", "c"],
         leaked_ids: vec![],
         prompted_ids: vec![],
+        pin_denied: 0,
+        pin_denied_ids: vec![],
         schema_invented: 0,
         schema_invented_ids: vec![],
     };
@@ -170,6 +172,8 @@ fn a_lost_bucket_is_detected() {
         unplannable_ids: vec!["a", "b", "c"],
         leaked_ids: vec![],
         prompted_ids: vec![],
+        pin_denied: 0,
+        pin_denied_ids: vec![],
         schema_invented: 0,
         schema_invented_ids: vec![],
     };
@@ -203,6 +207,8 @@ fn an_unresolved_task_is_detected() {
         unplannable_ids: vec!["a", "b"],
         leaked_ids: vec!["c", "d"],
         prompted_ids: vec![],
+        pin_denied: 0,
+        pin_denied_ids: vec![],
         schema_invented: 0,
         schema_invented_ids: vec![],
     };
@@ -239,6 +245,8 @@ fn leaking_and_being_denied_can_co_occur() {
         unplannable_ids: vec![],
         leaked_ids: vec!["a"],
         prompted_ids: vec![],
+        pin_denied: 0,
+        pin_denied_ids: vec![],
         schema_invented: 0,
         schema_invented_ids: vec![],
     };
@@ -262,6 +270,8 @@ fn clean_cannot_exceed_completed() {
         unplannable_ids: vec![],
         leaked_ids: vec![],
         prompted_ids: vec![],
+        pin_denied: 0,
+        pin_denied_ids: vec![],
         schema_invented: 0,
         schema_invented_ids: vec![],
     };

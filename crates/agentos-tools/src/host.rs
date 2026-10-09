@@ -24,6 +24,7 @@ use agentos_policy::{ArgView, ConfirmationRequest, Decision, PolicyEngine};
 use agentos_types::{approval_key, UserId, Val};
 
 use crate::audit::{ArgumentRecord, AuditLog, AttemptToken, OutcomeKind, PolicySummary};
+use crate::pins::IntentPins;
 
 /// Why an approval could not be recorded.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -74,6 +75,12 @@ pub struct PolicyHost {
     /// See [`Self::grant`] for why a resumed plan needs these and why they are
     /// consumed rather than remembered.
     grants: std::collections::HashMap<(String, [u8; 32]), ()>,
+    /// Constraints the user stated, which an untrusted source may not contradict.
+///
+/// Optional: a host with none behaves exactly as before. Set once per session,
+/// from the user's own request — never from a document, or an attacker would be
+/// choosing the constraints they are checked against.
+    pins: Option<IntentPins>,
     /// The user this session acts for.
     ///
     /// Part of the host rather than a parameter to `grant`, because the key has to
@@ -132,7 +139,22 @@ impl PolicyHost {
             pending: Vec::new(),
             grants: std::collections::HashMap::new(),
             user,
+            pins: None,
         }
+    }
+
+    /// Constrain this session by what the user actually asked for.
+    ///
+    /// Built from the request text, which is trusted because the user typed it.
+    /// Passing a document here would hand the attacker the rulebook they are
+    /// checked against.
+    pub fn pin_intent(&mut self, request: &str) {
+        self.pins = Some(IntentPins::from_request(request));
+    }
+
+    /// The pins in force, if any.
+    pub fn pins(&self) -> Option<&IntentPins> {
+        self.pins.as_ref()
     }
 
     /// Record that `user` approved exactly `value` in the position `scope`.
@@ -395,6 +417,32 @@ impl ToolHost for PolicyHost {
         //    value whose provenance was dropped on the way here.
         let all_views = Self::views(args);
         let decision = self.engine.evaluate(tool, &all_views);
+
+        // A value that contradicts something the user explicitly stated is
+        // refused outright, whatever the rules say about it.
+        //
+        // This runs *before* the grant check and can only ever turn an `Allow`
+        // into a `Deny`, so it cannot be unlocked by an approval — which matters,
+        // because the whole point is that this is not a question for a human. If
+        // the user said "email bob@example.com" and an untrusted source supplied
+        // a different address, then no approval the user could give ought to make
+        // that call happen; the user is not being asked to ratify a substitution
+        // they did not make.
+        let decision = match &self.pins {
+            Some(pins) => {
+                let contradiction = args.iter().find_map(|(name, value)| {
+                    pins.contradiction(value).map(|why| (name.clone(), why))
+                });
+                match contradiction {
+                    Some((arg, why)) => Decision::Deny {
+                        op: format!("{tool}.{arg}"),
+                        reason: format!("contradicts the user's request: {why}"),
+                    },
+                    None => decision,
+                }
+            }
+            None => decision,
+        };
 
         // A grant answers exactly one question: "did the user approve this?". It
         // is therefore consulted *after* evaluation and *only* on `Confirm`.

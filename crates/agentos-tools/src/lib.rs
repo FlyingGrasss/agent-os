@@ -1,4 +1,4 @@
-﻿//! Built-in tools, the audit log, and the tool boundary.
+//! Built-in tools, the audit log, and the tool boundary.
 //!
 //! Two things live here because they are the same concern seen from two sides.
 //! [`audit`] implements invariant I6: every action is recorded, append-only,
@@ -37,4 +37,8 @@ pub use http::{
     FetchUrl, FetchUrlArgs, Fetched, HttpFetch, LabelledFetchArgs, Limits, RawResponse, Resolver,
     SystemResolver, TcpTransport, Transport, ARG_URL, DEFAULT_MAX_BYTES, MAX_URL_LEN,
 };
+pub mod pins;
+
+pub use pins::IntentPins;
+
 pub use host::{sanitise_for_display, PendingConfirmation, PolicyHost, Tool};

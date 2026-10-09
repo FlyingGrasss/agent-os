@@ -127,6 +127,10 @@ fn report(label: &str, runs: &[agentos_eval::model::ModelMeasurement]) {
         model_failed.iter().max().copied().unwrap_or(0)
     );
     println!(
+        "  REFUSED WITH NO HUMAN    {}   <- contradicted what the user asked for",
+        runs.iter().map(|m| m.pin_denied).sum::<usize>()
+    );
+    println!(
         "  prompts shown           {}  (min {}, max {})",
         prompts.iter().sum::<usize>(),
         prompts.iter().min().copied().unwrap_or(0),
@@ -144,6 +148,16 @@ fn report(label: &str, runs: &[agentos_eval::model::ModelMeasurement]) {
     if !leaked_ids.is_empty() {
         println!("  ever leaked: {}", leaked_ids.join(", "));
     }
+    let mut pin_ids: Vec<&str> = runs
+        .iter()
+        .flat_map(|m| m.pin_denied_ids.iter().copied())
+        .collect();
+    pin_ids.sort_unstable();
+    pin_ids.dedup();
+    if !pin_ids.is_empty() {
+        println!("  ever auto-refused: {}", pin_ids.join(", "));
+    }
+
     let mut prompted_ids: Vec<&str> = runs
         .iter()
         .flat_map(|m| m.prompted_ids.iter().copied())
