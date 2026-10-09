@@ -291,7 +291,15 @@ impl PolicyHost {
     /// pass.
     fn views(args: &BTreeMap<String, PlanValue>) -> BTreeMap<String, ArgView<'_>> {
         args.iter()
-            .map(|(name, value)| (name.clone(), ArgView::new(value, plan_text)))
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    // Two renderings, deliberately: `plan_text` for the rules, which
+                    // must never pattern-match attacker prose, and `plan_display` for
+                    // the person who has to decide.
+                    ArgView::with_display(value, plan_text, plan_display),
+                )
+            })
             .collect()
     }
 
@@ -318,8 +326,9 @@ impl PolicyHost {
 /// The text form of a plan value, if it has one.
 ///
 /// Deliberately returns `None` for `Quoted` even though it holds text. Quoted
-/// values exist precisely to be unreadable by the Controller, so policy
-/// evaluation must not render them either.
+/// values exist to be unreadable by the Controller, so this function feeds two
+/// paths that must never see attacker prose: policy evaluation, where a rule
+/// could pattern-match it, and the audit log, which is a Controller input.
 fn plan_text(data: &PlanData) -> Option<String> {
     match data {
         PlanData::Str(s) | PlanData::Enum(s) => Some(s.clone()),
@@ -327,6 +336,44 @@ fn plan_text(data: &PlanData) -> Option<String> {
         PlanData::Bool(b) => Some(b.to_string()),
         _ => None,
     }
+}
+
+/// A rendering of a plan value for a person deciding whether to allow it.
+///
+/// Unlike [`plan_text`] this *does* render quarantined text, because the
+/// confirmation prompt goes to a human and withholding the value makes the
+/// decision unfalsifiable. A user asked to approve
+/// `send_email(to = <structured value>)` cannot tell where the mail goes, so the
+/// only available answer is yes without reading — which turns the human into a
+/// rubber stamp while every approval is still recorded as deliberate.
+///
+/// Control characters are replaced rather than passed through. The value is
+/// attacker-controlled and this string is destined for a terminal, where an ANSI
+/// escape can rewrite the line, hide the provenance beside it, or fake a
+/// different argument entirely. Rendering it faithfully would hand the document
+/// control of the prompt.
+fn plan_display(data: &PlanData) -> Option<String> {
+    match data {
+        PlanData::Quoted { text, .. } => Some(sanitise_for_display(text)),
+        other => plan_text(other),
+    }
+}
+
+/// Replace control characters, so rendered untrusted text cannot drive a terminal.
+///
+/// C0 controls (including ESC, which starts every ANSI sequence), DEL, and the C1
+/// range. Tab and newline are kept because they are ordinary text in an address or
+/// a note, and dropping them would misrepresent the value; everything else becomes
+/// U+FFFD so the string's length is preserved and nothing is silently lost.
+pub fn sanitise_for_display(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\t' | '\n' | '\r' => c,
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => '\u{fffd}',
+            c if (0x80..=0x9f).contains(&(c as u32)) => '\u{fffd}',
+            c => c,
+        })
+        .collect()
 }
 
 impl ToolHost for PolicyHost {

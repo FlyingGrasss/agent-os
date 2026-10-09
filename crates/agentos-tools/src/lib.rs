@@ -37,4 +37,4 @@ pub use http::{
     FetchUrl, FetchUrlArgs, Fetched, HttpFetch, LabelledFetchArgs, Limits, RawResponse, Resolver,
     SystemResolver, TcpTransport, Transport, ARG_URL, DEFAULT_MAX_BYTES, MAX_URL_LEN,
 };
-pub use host::{PendingConfirmation, PolicyHost, Tool};
+pub use host::{sanitise_for_display, PendingConfirmation, PolicyHost, Tool};

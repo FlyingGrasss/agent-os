@@ -1,0 +1,161 @@
+//! Bridging the inference extractor to the plan language.
+//!
+//! # The gap this fills
+//!
+//! Two extractors exist and they do not meet. `agentos_infer::Extractor` is the
+//! quarantined processor: it takes a [`Quarantined`] document and a JSON Schema,
+//! and returns JSON. `agentos_dsl::Extractor` is what the interpreter calls: it
+//! takes a [`PlanData`] document and a schema *name*, and returns [`PlanData`].
+//!
+//! Every plan that reads a web page needs both, so something has to convert. That
+//! conversion is where a string lifted out of an untrusted document becomes a
+//! value the rest of the system can hold, and it is the single most security-
+//! sensitive line of code in this file.
+//!
+//! # The rule
+//!
+//! **Every string in an extraction becomes [`PlanData::Quoted`], and the result
+//! carries the document's label — regardless of what the extractor said.**
+//!
+//! `PlanData::Str` is what a planner-authored literal looks like, and `report`
+//! will happily print a trusted `Str`. So a conversion that turned an extracted
+//! string into `Str` would hand attacker text to the Controller as
+//! planner-authored prose, which is precisely the injection I1 exists to prevent
+//! — reached through a JSON deserialiser rather than through a prompt.
+//!
+//! The label is forced rather than carried for the same reason. An extractor that
+//! returned a `Trusted` label would be a bug in the extractor, and the wrong
+//! response to a bug in a trust boundary is to fail closed, not to propagate it.
+//! The document was untrusted by construction; nothing downstream can make that
+//! not so.
+//!
+//! # What is preserved
+//!
+//! Structure. The extractor's job is to bound *shape*, and the shape is real
+//! information: a `bool` that came back as a bool is still a bool, and an integer
+//! is still an integer. Only text is restricted, because only text can carry an
+//! instruction. That is the same rule the interpreter applies at `report`, and
+//! having it in both places means the restriction does not depend on which path a
+//! value took to get there.
+
+use std::collections::BTreeMap;
+
+use agentos_dsl::{PlanData, PlanError};
+use agentos_infer::Extractor as InferExtractor;
+use agentos_types::{Quarantined, SourceId};
+
+/// Adapts a quarantined [`InferExtractor`] into the plan language's.
+///
+/// Holds the schema table rather than taking one per call: the interpreter names
+/// a schema by string, and resolving that name to a JSON Schema is a Controller
+/// decision made once, at construction, from schemas the Controller chose. A
+/// schema arriving from the plan would let the plan choose the shape of what it is
+/// allowed to learn.
+pub struct ModelExtractor<'a> {
+    inner: &'a mut dyn InferExtractor,
+    schemas: BTreeMap<String, serde_json::Value>,
+}
+
+impl<'a> ModelExtractor<'a> {
+    pub fn new(
+        inner: &'a mut dyn InferExtractor,
+        schemas: BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        Self { inner, schemas }
+    }
+
+    /// Register a schema the plans may name.
+    pub fn with_schema(mut self, name: impl Into<String>, schema: serde_json::Value) -> Self {
+        self.schemas.insert(name.into(), schema);
+        self
+    }
+}
+
+impl agentos_dsl::Extractor for ModelExtractor<'_> {
+    fn extract(&mut self, schema: &str, document: &PlanData) -> Result<PlanData, PlanError> {
+        let spec = self.schemas.get(schema).ok_or_else(|| PlanError::UnknownSchema {
+            schema: schema.to_string(),
+        })?;
+
+        // The document must be text the quarantined processor can actually be
+        // given. Anything else is refused rather than rendered: turning an
+        // arbitrary value into a string here would be inventing an input the
+        // quarantine boundary never inspected.
+        let (text, source) = match document {
+            PlanData::Quoted { text, source } => (text.clone(), *source),
+            other => {
+                return Err(PlanError::ToolRejected {
+                    tool: "extract".into(),
+                    reason: format!(
+                        "extraction needs an untrusted document, got {}",
+                        other.type_name()
+                    ),
+                })
+            }
+        };
+
+        let quarantined = Quarantined::from_source(text, source);
+        let extraction = self.inner.extract(spec, &quarantined).map_err(|e| {
+            PlanError::ToolRejected {
+                tool: "extract".into(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        // No label is set here, and that is deliberate. The interpreter applies
+        // the document's own label to whatever this returns, so an extraction
+        // inherits the taint of the document it was lifted out of. Setting one
+        // here would either duplicate that or, worse, provide a place where a
+        // trusted label could be attached to attacker-controlled structure.
+        //
+        // Read through the deliberately awkward accessor, because that is the only
+        // way to see inside a `Val` whose label has not been vouched for. It also
+        // hands over the extractor's own claim, which is checked rather than
+        // believed: an extractor that reports a *trusted* result for an untrusted
+        // document is broken, and the right response to a broken trust boundary is
+        // to refuse the run, not to launder the label through.
+        extraction.data.with_label_for_display(|json, label| {
+            if label.is_trusted() {
+                return Err(PlanError::ToolRejected {
+                    tool: "extract".into(),
+                    reason: "extractor returned a trusted result for an untrusted document"
+                        .into(),
+                });
+            }
+            Ok(from_json(json))
+        })
+    }
+}
+
+/// Convert an extraction's JSON into plan data.
+///
+/// Every string becomes [`PlanData::Quoted`]. This is the rule the module is
+/// about, so it is a free function with no label plumbing in it: there is no way
+/// for a caller to pass a trusted label through, because there is nowhere to pass
+/// one.
+fn from_json(value: &serde_json::Value) -> PlanData {
+    match value {
+        serde_json::Value::Null => PlanData::Unit,
+        serde_json::Value::Bool(b) => PlanData::Bool(*b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => PlanData::Int(i),
+            // A non-integer number has no bounded representation in the plan
+            // language. `Unit` is the honest answer: the field existed, and its
+            // value is not something this language can carry. It is not `0`,
+            // because that would be a value the document never contained.
+            None => PlanData::Unit,
+        },
+        // Every string, always. See the module docs.
+        serde_json::Value::String(s) => PlanData::Quoted {
+            text: s.clone(),
+            source: SourceId::nil(),
+        },
+        serde_json::Value::Array(items) => PlanData::List(items.iter().map(from_json).collect()),
+        serde_json::Value::Object(fields) => PlanData::Record(
+            fields
+                .iter()
+                .map(|(k, v)| (k.clone(), from_json(v)))
+                .collect(),
+        ),
+    }
+}

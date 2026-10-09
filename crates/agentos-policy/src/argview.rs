@@ -24,6 +24,17 @@ pub struct ArgView<'a> {
     /// `None`, which the rules treat as "no text to inspect" rather than as an
     /// empty string.
     text: Option<String>,
+    /// A rendering for a human, which may be present even when `text` is `None`.
+    ///
+    /// Kept separate because the two answer different questions. `text` is what
+    /// the *rules* inspect, and a value whose text is attacker-controlled must
+    /// not become something a rule pattern-matches against. `display` is what a
+    /// *person* reads when deciding, and withholding it there produces a
+    /// confirmation nobody can meaningfully give.
+    ///
+    /// Nothing in policy evaluation reads this field. A rule cannot be moved onto
+    /// attacker-controlled text by changing what the user is shown.
+    display: Option<String>,
 }
 
 impl<'a> ArgView<'a> {
@@ -39,7 +50,39 @@ impl<'a> ArgView<'a> {
         // confused for the label.
         let label = value.label();
         let text = value.with_label_for_display(|v, _| text(v));
-        Self { label, text }
+        Self {
+            label,
+            display: None,
+            text,
+        }
+    }
+
+    /// Build a view that also carries a human-facing rendering.
+    ///
+    /// `display` is used only by [`Self::display_text`]. It exists so a value the
+    /// rules must not inspect as text — an extracted, quarantined string — can
+    /// still be *shown* to the user who is being asked to approve it.
+    ///
+    /// Withholding it would not make the system safer. It would make the
+    /// confirmation unfalsifiable: a user asked to approve
+    /// `send_email(to = <structured value>)` cannot tell where the mail goes, so
+    /// the only possible answer is yes without reading. That converts the human
+    /// into a rubber stamp, which is the failure mode the confirmation step exists
+    /// to avoid — and it would do so while reporting every approval as a
+    /// deliberate decision.
+    pub fn with_display<T>(
+        value: &'a Val<T>,
+        text: impl FnOnce(&T) -> Option<String>,
+        display: impl FnOnce(&T) -> Option<String>,
+    ) -> Self {
+        let label = value.label();
+        let display = value.with_label_for_display(|v, _| display(v));
+        let text = value.with_label_for_display(|v, _| text(v));
+        Self {
+            label,
+            text,
+            display,
+        }
     }
 
     /// Build a view for an argument that carries no text form.
@@ -47,6 +90,7 @@ impl<'a> ArgView<'a> {
         Self {
             label: value.label(),
             text: None,
+            display: None,
         }
     }
 
@@ -66,11 +110,15 @@ impl<'a> ArgView<'a> {
 
     /// Render for a confirmation prompt.
     ///
-    /// Confirmation prompts are shown to a human, not fed to a model, so
-    /// showing the exact value is the point. A value with no text form is
-    /// described structurally instead, which keeps the user informed without
-    /// inventing a rendering.
+    /// Confirmation prompts are shown to a human, not fed to a model, so showing
+    /// the exact value is the point — and it is the *only* thing that makes the
+    /// answer meaningful. A value with no display rendering and no text form is
+    /// described structurally, which keeps the user informed without inventing
+    /// one.
     pub fn display_text(&self) -> String {
+        if let Some(d) = &self.display {
+            return d.clone();
+        }
         match &self.text {
             Some(t) => t.clone(),
             None => format!("<{}>", self.type_hint()),
