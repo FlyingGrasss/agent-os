@@ -4,13 +4,16 @@ Status against the original seven-phase roadmap. Checked boxes mean built **and*
 covered by a test that would fail if the property broke. Anything unchecked with
 a note means something was built but the phase's exit criterion is not met.
 
-Last updated to match commit `a5559c5` plus the `agentos-eval` measurement crate.
+Last updated to match commit `6d376ea`.
 
 **Verification for this update:** `cargo test --workspace` and
 `cargo clippy --all-targets -- -D warnings` both clean on Linux
-(`x86_64-unknown-linux-gnu`) and on the Windows host — 427 tests on Linux, 336 on
+(`x86_64-unknown-linux-gnu`) and on the Windows host — 510 tests on Linux, 424 on
 Windows, zero failures, zero clippy warnings on either. The gap between the two
 counts is the Linux-only sandbox, quarantine, and seccomp suites.
+
+The live model arm is verified separately, against a running Ollama with
+`llama3.2:3b`: 3 runs × 14 tasks × 2 arms. It is not part of either count.
 
 ---
 
@@ -135,8 +138,8 @@ counts is the Linux-only sandbox, quarantine, and seccomp suites.
 
 ## Known open risks
 
-1. **No model-shaped measurement.** The policy layer is now measured — 29/33 attacks succeed undefended, 0/33 defended, with the corpus verified adversarial by a control. But every number about *model behaviour* is still unmeasured, because there is no agent loop and no model backend. A system that cannot show an attack failing has not shown it is blocked, and this still applies to anything involving the model itself.
-2. **Most of the surviving defence is a human.** Of 33 attacks, 12 are refused automatically and **17 get through if the user approves everything**. On data poisoning — the residual hole both CaMeL's and AgentDojo's own authors name — four of five attacks survive an approving user. This makes confirmation fatigue a security property, not a usability one, and nothing in the design currently defends it.
+1. **Model measurement exists but is thin.** The policy layer is measured over 45 programs, and the model arm now runs end to end: a real model writes a plan, a hostile document attacks it, and the session enforces policy — 0/42 leaks with a reading user, 7/42 (16.7%) with an approving one. But that is **one 3B checkpoint over 3 runs**, with role Q stubbed. A different model, a real Q, or more runs would move it. Nothing here should be read as a claim about models in general.
+2. **Most of the surviving defence is a human.** Of 33 corpus attacks, 12 are refused automatically and **17 get through if the user approves everything**. The model arm agrees: 0% leak against a reading user, 16.7% against an approving one. On data poisoning — the residual hole both CaMeL's and AgentDojo's own authors name — four of five attacks survive an approving user. This makes confirmation fatigue a security property, not a usability one, and **nothing in the design currently defends it**. It is the largest unsolved problem in the repository.
 3. **No resource containment.** cgroups and namespaces are blocked on this host, so a confined process can exhaust CPU or memory. Landlock and seccomp control *reach*, not *cost*. The DSL's own step and loop budgets are the only bound, and the measurement shows they do fire.
 4. **eBPF loading unverified** after the sysctl change.
 5. **The pool's confinement is Unix-only and its test image is a reference.** `agentos-worker` proves the mechanism; it is not the real interpreter. A different image may need loader syscalls the `Worker` profile does not grant, and the failure mode is a worker that cannot start rather than one that runs too freely — the safe direction, but still a deployment hazard.
