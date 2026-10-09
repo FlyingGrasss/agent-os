@@ -11,6 +11,7 @@ agentos-infer = { workspace = true }
 uuid = { workspace = true }
 agentos-policy = { workspace = true }
 agentos-tools = { workspace = true }
+agentos-core = { workspace = true }
 agentos-types = { workspace = true }
 
 # The tests assert against the policy engine's rule set and the leak counter

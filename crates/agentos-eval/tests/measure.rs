@@ -21,10 +21,142 @@
 //! here, the one test that touches those counters runs alone and every other
 //! test is a pure function of its inputs.
 
-use agentos_eval::{
-    counterfactual_engine, defended_engine, observe, Measurement, Outcome, CORPUS,
-};
+use agentos_eval::{counterfactual_engine, defended_engine, observe, Measurement, Outcome, CORPUS};
 use agentos_policy::Rule;
+
+// ---------------------------------------------------------------------------
+// Driving the corpus through a user who answers
+// ---------------------------------------------------------------------------
+
+/// A denied attack is stopped by a machine, with nobody involved.
+///
+/// This is the claim the whole automatic-versus-human split rests on, so it is
+/// checked against the typed error rather than against a count. Before `Session`
+/// carried its `PlanError`, a denial and a budget stop arrived as the same
+/// string and this distinction was not expressible.
+#[test]
+fn a_denial_is_reported_as_a_denial_not_as_a_prompt() {
+    let mut saw_denial = false;
+    let mut saw_refusal = false;
+    for program in CORPUS.iter() {
+        if program.kind != agentos_eval::Kind::Attack {
+            continue;
+        }
+        let observation = observe(program.source, defended_engine());
+        match observation.outcome {
+            Outcome::Denied { .. } => {
+                saw_denial = true;
+                assert_eq!(
+                    observation.asked, 0,
+                    "{} was denied by policy, so nobody should have been asked",
+                    program.id
+                );
+            }
+            Outcome::Refused { .. } => {
+                saw_refusal = true;
+                assert!(
+                    observation.asked >= 1,
+                    "{} was refused, so a person must have been asked",
+                    program.id
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_denial, "the corpus must contain machine-denied attacks");
+    assert!(
+        saw_refusal,
+        "the corpus must contain attacks held only by a prompt, or the split is vacuous"
+    );
+}
+
+/// Giving up is not a refusal, and the two must never be counted together.
+///
+/// A session that ran out of permission to ask has not been stopped by a person.
+/// Folding the two would let the design present a loop giving up as a user
+/// holding the line — which is the same error as reporting automatic refusal as
+/// human refusal, one level up.
+#[test]
+fn a_session_that_gives_up_is_not_reported_as_a_user_refusal() {
+    let m = Measurement::run();
+
+    // Every attack ends in exactly one bucket. If the buckets stopped summing to
+    // the total, one of them would be double-counted or one outcome would be
+    // falling out of the accounting entirely — and a dropped bucket is
+    // indistinguishable from a bucket that is always zero, which is how a
+    // "gave up asking" figure gets quietly reported as zero.
+    let classified = m.defended.attack_succeeded
+        + m.defended.attack_denied
+        + m.defended.attack_user_refused
+        + m.defended.attack_confirmation_limit
+        + m.defended.attack_halted;
+    assert_eq!(
+        classified, m.defended.attack_total,
+        "every defended-arm attack must land in exactly one bucket"
+    );
+
+    // An arm where nothing ever asks must report zero prompts. If it reported
+    // some, the "held only by a prompt" figure would be picking up prompts that
+    // no human was ever shown.
+    assert_eq!(
+        m.counterfactual.prompts, 0,
+        "the counterfactual arm removes the rules, so nobody is ever asked"
+    );
+    assert_eq!(
+        m.user_approves.prompts, 0,
+        "the no-rules arm removes the questions too"
+    );
+
+    // The declined arm must actually have asked someone, or the human-dependent
+    // figure is a counting artefact rather than a measurement.
+    assert!(
+        m.defended.prompts > 0,
+        "the defended arm asks a declining user questions, so prompts must be non-zero"
+    );
+    assert!(
+        m.defended.prompts >= m.defended.attack_user_refused,
+        "each refused attack needs at least one prompt"
+    );
+    assert!(
+        m.defended_rubber_stamp.prompts > 0,
+        "the rubber-stamp arm asks too — that is what makes it comparable"
+    );
+}
+
+/// The rubber-stamp arm is the defended arm with one variable changed.
+///
+/// If the two arms differed in anything else — the rule set, the extractor, the
+/// corpus — the gap between them would not be attributable to the user. So the
+/// only claim made is that the same rules behave differently depending on the
+/// answer, and it is checked by confirming the rubber-stamp arm is *not* the
+/// defended arm.
+#[test]
+fn the_rubber_stamp_arm_differs_from_the_defended_arm_only_in_the_answer() {
+    let m = Measurement::run();
+
+    assert_eq!(
+        m.defended.attack_total, m.defended_rubber_stamp.attack_total,
+        "both arms must run the same corpus"
+    );
+    // Approving a confirmation lets a program run *past* it, so the rubber-stamp
+    // arm reaches denials the declining arm never got to. The count therefore
+    // goes up rather than staying level — which is worth stating, because the
+    // naive expectation is that the denial count is fixed by the rules.
+    assert!(
+        m.defended_rubber_stamp.attack_denied >= m.defended.attack_denied,
+        "approving must not un-deny anything: {} denials rubber-stamped vs {} declined",
+        m.defended_rubber_stamp.attack_denied,
+        m.defended.attack_denied
+    );
+
+    // The whole point: with the rules unchanged, an approving user lets attacks
+    // through that a declining user stopped.
+    assert!(
+        m.defended_rubber_stamp.attack_succeeded > m.defended.attack_succeeded,
+        "if rubber-stamping changed nothing, the human-dependent finding would be \
+         an artefact of the harness rather than a property of the design"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // The controls, and the numbers they license
@@ -594,7 +726,8 @@ fn describe(o: &Outcome) -> String {
     match o {
         Outcome::Completed => "completed".into(),
         Outcome::Denied { op } => format!("denied {op}"),
-        Outcome::ConfirmRequired { op } => format!("confirm {op}"),
+        Outcome::Refused { op } => format!("refused {op}"),
+        Outcome::ConfirmationLimit { asked } => format!("gave up after {asked} prompt(s)"),
         Outcome::Halted { reason } => format!("halted: {reason}"),
     }
 }

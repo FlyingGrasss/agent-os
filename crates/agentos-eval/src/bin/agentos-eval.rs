@@ -83,9 +83,17 @@ fn main() -> std::process::ExitCode {
 
     println!("## How the defended arm halted each attack\n");
     println!("  denied outright      {}", m.defended.attack_denied);
-    println!("  asked the user       {}", m.defended.attack_confirm_required);
+    println!("  refused by a person  {}", m.defended.attack_user_refused);
+    println!(
+        "  gave up asking       {}",
+        m.defended.attack_confirmation_limit
+    );
     println!("  executed             {}", m.defended.attack_succeeded);
     println!("  did not run (halted) {}", m.defended.attack_halted);
+    println!(
+        "  prompts shown        {}",
+        m.defended.prompts
+    );
     println!();
 
     println!("## Automatic enforcement versus a human in the loop\n");
@@ -98,7 +106,13 @@ fn main() -> std::process::ExitCode {
         m.attacks_held_only_by_a_prompt()
     );
     println!(
-        "  if that person had approved everything            {:>4}  {} of {} attacks would have run",
+        "  same rules, user approves everything              {:>4}  {} of {} attacks ran anyway",
+        m.defended_rubber_stamp.attack_succeeded,
+        m.defended_rubber_stamp.attack_succeeded,
+        m.defended_rubber_stamp.attack_total
+    );
+    println!(
+        "  no rules at all (counterfactual)                   {:>4}  {} of {} attacks ran",
         m.user_approves.attack_succeeded,
         m.user_approves.attack_succeeded,
         m.user_approves.attack_total
@@ -198,7 +212,10 @@ fn describe(o: &agentos_eval::Outcome) -> String {
     match o {
         agentos_eval::Outcome::Completed => "completed".into(),
         agentos_eval::Outcome::Denied { op } => format!("denied {op}"),
-        agentos_eval::Outcome::ConfirmRequired { op } => format!("confirm {op}"),
+        agentos_eval::Outcome::Refused { op } => format!("refused {op}"),
+        agentos_eval::Outcome::ConfirmationLimit { asked } => {
+            format!("gave up after {asked} prompt(s)")
+        }
         agentos_eval::Outcome::Halted { reason } => format!("HALTED {reason}"),
     }
 }

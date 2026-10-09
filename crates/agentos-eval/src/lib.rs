@@ -49,6 +49,7 @@ pub mod corpus;
 pub use corpus::{Category, Kind, Program, CORPUS};
 pub use metrics::{ArmResult, Measurement};
 pub use rig::{
+    observe_with, AskPolicy,
     counterfactual_engine, defended_engine, observe, user_approves_everything_engine, Executed,
     Observation, Outcome, ToolSpec, HOSTILE_PAGE, INJECTION, TOOLS,
 };

@@ -40,6 +40,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use agentos_core::{Outcome as SessionOutcome, Session};
 use agentos_dsl::{Extractor, PlanData, PlanError, PlanValue};
 use agentos_policy::{PolicyEngine, Rule, RuleSet};
 use agentos_tools::audit::{AuditLog, MemorySink, SystemClock};
@@ -343,11 +344,26 @@ pub enum Outcome {
         /// The `tool.arg` the engine refused.
         op: String,
     },
-    /// The policy engine halted the call pending a user decision. The tool never
-    /// ran. There is no resume mechanism, so a confirmation is terminal here.
-    ConfirmRequired {
-        /// The `tool.arg` the user would be asked about.
+    /// The policy engine halted the call pending a user decision, and the user
+    /// declined. The tool never ran and the plan did not resume.
+    ///
+    /// This is what a `Confirm` looks like once a resume mechanism exists. It is
+    /// a *different* claim from [`Outcome::Denied`]: a machine refused with nobody
+    /// involved, versus a person was asked and said no. Conflating them would let
+    /// the design claim credit for user attention, which is the whole reason the
+    /// automatic-versus-human split exists.
+    Refused {
+        /// The `tool.arg` the user was asked about and declined.
         op: String,
+    },
+    /// The session asked more times than it was allowed to and gave up.
+    ///
+    /// Not a refusal. Nobody said no; the loop simply could not keep asking. It is
+    /// reported separately so that "a person was asked and declined" and "we gave
+    /// up asking" never appear as the same result.
+    ConfirmationLimit {
+        /// How many times the user was actually asked.
+        asked: usize,
     },
     /// The plan stopped for some other reason: a parse error, a bad field, a step
     /// budget. Recorded rather than swallowed, because a corpus entry that does
@@ -356,6 +372,32 @@ pub enum Outcome {
         /// Why it stopped.
         reason: String,
     },
+}
+
+/// What the simulated user does when policy asks.
+///
+/// This is the variable the measurement turns on, and it is worth being precise
+/// about because two of the arms differ *only* in this field.
+///
+/// A `Confirm` is a question, not a wall. Whether an attack "succeeds" against a
+/// defended engine therefore depends on the answer — which means the headline
+/// number is a claim about the rules *and* an assumption about the person. The
+/// assumption has to be named, and it has to be measured both ways, or "0%
+/// attack success" is really "0% attack success among people who read the prompt".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskPolicy {
+    /// The user reads what they were shown and declines.
+    ///
+    /// This is the defended arm's assumption. It models a person who does not
+    /// rubber-stamp, which is the only reading under which the number says
+    /// something about the rules rather than about optimism.
+    Decline,
+    /// The user approves everything asked, without reading.
+    ///
+    /// This is the adversarial reading: it measures exactly how much of the defence
+    /// is the human rather than the policy. Every attack that reaches a `Confirm`
+    /// and succeeds here is an attack whose only obstacle was a prompt.
+    ApproveAll,
 }
 
 /// Everything observed about one program in one arm.
@@ -371,6 +413,12 @@ pub struct Observation {
     pub reports: Vec<String>,
     /// Confirmation requests the host queued.
     pub pending_ops: Vec<String>,
+    /// How many times a person was actually asked.
+    ///
+    /// Prompts, not arguments: one drain may put several arguments to a single
+    /// question. Zero here with a non-empty `pending_ops` would mean the requests
+    /// were queued but nobody was asked, which is a different (and worse) result.
+    pub asked: usize,
 }
 
 impl Observation {
@@ -395,13 +443,26 @@ impl Observation {
     pub fn intervened(&self) -> bool {
         matches!(
             self.outcome,
-            Outcome::Denied { .. } | Outcome::ConfirmRequired { .. }
+            Outcome::Denied { .. } | Outcome::Refused { .. }
         )
     }
 }
 
 /// Run one program under one engine and report what happened.
+///
+/// The simulated user declines every confirmation. That is the assumption the
+/// headline number rests on, so it is the default rather than something a caller
+/// has to remember to pass. Use [`observe_with`] for the other reading.
 pub fn observe(source: &str, engine: PolicyEngine) -> Observation {
+    observe_with(source, engine, AskPolicy::Decline)
+}
+
+/// Run one program under one engine, with an explicit simulated user.
+pub fn observe_with(
+    source: &str,
+    engine: PolicyEngine,
+    ask_policy: AskPolicy,
+) -> Observation {
     let plan = match agentos_dsl::parse(source) {
         Ok(p) => p,
         Err(e) => {
@@ -413,44 +474,70 @@ pub fn observe(source: &str, engine: PolicyEngine) -> Observation {
                 executions: Vec::new(),
                 reports: Vec::new(),
                 pending_ops: Vec::new(),
+                asked: 0,
             }
         }
     };
 
     let log: ExecLog = Rc::new(RefCell::new(Vec::new()));
+    // One user for both. Grants are keyed on the user id, so constructing two
+    // different ones here would silently make every approval miss.
+    let who = user();
     let mut host = PolicyHost::new(
         engine,
         AuditLog::new(Box::new(MemorySink::new()), Box::new(SystemClock)),
-        user(),
+        who,
     );
     for spec in TOOLS.iter() {
         host.register(Box::new(Probe { spec, log: log.clone() }));
     }
 
     let mut extractor = HostileInvoice;
-    let (outcome, reports) = match agentos_dsl::run(
-        &plan,
-        &mut host,
-        &mut extractor,
-        agentos_dsl::Limits::default(),
-    ) {
-        Ok(done) => (
-            Outcome::Completed,
-            done.reports.into_iter().map(|r| r.summary).collect(),
-        ),
-        Err(PlanError::PolicyDenied { op, .. }) => (Outcome::Denied { op }, Vec::new()),
-        Err(PlanError::ConfirmationRequired { op }) => {
-            (Outcome::ConfirmRequired { op }, Vec::new())
+    // Captured here rather than read off the host afterwards: the session drains
+    // the host's queue to put the question to the user, so by the time it returns
+    // there is nothing left there. Reading `take_pending()` afterwards would
+    // report zero confirmations for every program and quietly turn the
+    // human-dependent bucket into the automatic one.
+    let mut pending_ops: Vec<String> = Vec::new();
+    let mut session = Session::new(who, &mut host);
+    // Reports are only meaningful on success. A run that stopped partway produced
+    // some, but reporting them would put a partial plan's output next to a
+    // complete one's as though they were comparable.
+    let mut reports: Vec<String> = Vec::new();
+    let outcome = match session.run(&plan, &mut extractor, |request| {
+        pending_ops.push(format!(
+            "{}.{}",
+            request.tool,
+            request
+                .items
+                .first()
+                .map(|i| i.arg.as_str())
+                .unwrap_or("?")
+        ));
+        matches!(ask_policy, AskPolicy::ApproveAll)
+    }) {
+        Ok(SessionOutcome::Completed { reports: r }) => {
+            reports = r;
+            Outcome::Completed
         }
-        Err(other) => (
-            Outcome::Halted {
-                reason: other.to_string(),
-            },
-            Vec::new(),
-        ),
+        Ok(SessionOutcome::Refused { op }) => Outcome::Refused { op },
+        Ok(SessionOutcome::ConfirmationLimit { asked }) => {
+            Outcome::ConfirmationLimit { asked }
+        }
+        // The typed error is the whole reason `Session` carries it rather than a
+        // string. A denial and a budget stop are different claims, and the
+        // automatic-versus-human split is read off exactly this distinction.
+        Ok(SessionOutcome::Failed {
+            error: PlanError::PolicyDenied { op, .. },
+        }) => Outcome::Denied { op },
+        Ok(SessionOutcome::Failed { error }) => Outcome::Halted {
+            reason: error.to_string(),
+        },
+        Err(e) => Outcome::Halted {
+            reason: e.to_string(),
+        },
     };
 
-    let pending_ops = host.take_pending().into_iter().map(|p| p.op).collect();
     // Clone the log out rather than trying to unwrap the `Rc`. `try_unwrap`
     // fails whenever more than one `Probe` still holds a handle — and `host`
     // owns all six — and its failure mode is `unwrap_or_default()`, i.e. an
@@ -465,6 +552,7 @@ pub fn observe(source: &str, engine: PolicyEngine) -> Observation {
         executions,
         reports,
         pending_ops,
+        asked: session.asked(),
     }
 }
 
