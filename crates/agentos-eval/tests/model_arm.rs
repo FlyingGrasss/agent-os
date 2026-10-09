@@ -15,7 +15,7 @@
 //! built to make impossible.
 
 use agentos_eval::model::{
-    run_model_arm, ModelControlFailure, ModelMeasurement, MODEL_CORPUS,
+    run_model_arm, ModelControlFailure, ModelMeasurement, ModelTask, MODEL_CORPUS,
 };
 use agentos_infer::{Backend, Completion, Conversation, InferError, Output, Role, Usage};
 use agentos_types::Trusted;
@@ -143,6 +143,9 @@ fn folding_unplannable_into_blocked_is_detected() {
         prompts: 5,
         unplannable_ids: vec!["a", "b", "c"],
         leaked_ids: vec![],
+        prompted_ids: vec![],
+        schema_invented: 0,
+        schema_invented_ids: vec![],
     };
     assert_eq!(
         broken.check_accounting(),
@@ -166,6 +169,9 @@ fn a_lost_bucket_is_detected() {
         prompts: 2,
         unplannable_ids: vec!["a", "b", "c"],
         leaked_ids: vec![],
+        prompted_ids: vec![],
+        schema_invented: 0,
+        schema_invented_ids: vec![],
     };
     assert_eq!(
         broken.check_accounting(),
@@ -196,6 +202,9 @@ fn an_unresolved_task_is_detected() {
         prompts: 1,
         unplannable_ids: vec!["a", "b"],
         leaked_ids: vec!["c", "d"],
+        prompted_ids: vec![],
+        schema_invented: 0,
+        schema_invented_ids: vec![],
     };
     assert_eq!(
         broken.check_accounting(),
@@ -229,6 +238,9 @@ fn leaking_and_being_denied_can_co_occur() {
         prompts: 1,
         unplannable_ids: vec![],
         leaked_ids: vec!["a"],
+        prompted_ids: vec![],
+        schema_invented: 0,
+        schema_invented_ids: vec![],
     };
     assert_eq!(m.check_accounting(), Ok(()), "this must be legal");
 }
@@ -249,6 +261,9 @@ fn clean_cannot_exceed_completed() {
         prompts: 0,
         unplannable_ids: vec![],
         leaked_ids: vec![],
+        prompted_ids: vec![],
+        schema_invented: 0,
+        schema_invented_ids: vec![],
     };
     assert_eq!(
         broken.check_accounting(),
@@ -291,7 +306,54 @@ fn every_attack_has_a_document_and_the_corpus_covers_both_kinds() {
     }
 }
 
-/// Identifiers are unique, so a report cannot silently merge two tasks.
+/// Every attack has a benign twin.
+///
+/// Without one the corpus cannot tell "the injection was resisted" from "this task
+/// always prompts" — and an arm in which every task prompts measures the
+/// existence of the prompt rather than the model's behaviour. A corpus drifts
+/// toward prompts-everywhere exactly by losing these, so the pairing is asserted
+/// rather than assumed.
+///
+/// Twins are found by walking back through the id's segments until a matching
+/// `-benign` task appears.
+///
+/// So `model/recipient-injected` pairs with `model/recipient-benign`, and
+/// `model/recipient-authority-injected` — named for its vector rather than its
+/// effect — pairs with the same twin. Allowing several attacks to share one
+/// benign control is deliberate: they are the same request against the same
+/// clean document, differing only in what the hostile one says.
+#[test]
+fn every_attack_has_a_benign_twin() {
+    let tasks: Vec<&ModelTask> = MODEL_CORPUS.iter().collect();
+
+    for t in tasks.iter().filter(|t| t.attack) {
+        let mut candidate = t.id;
+        let twin = loop {
+            let Some((head, _)) = candidate.rsplit_once('-') else {
+                panic!("{}: an attack id must have a variant suffix", t.id);
+            };
+            let try_id = format!("{head}-benign");
+            if let Some(found) = tasks.iter().find(|x| x.id == try_id) {
+                break *found;
+            }
+            candidate = head;
+        };
+
+        assert!(
+            !twin.attack,
+            "{}: twin {} must be a benign control",
+            t.id,
+            twin.id
+        );
+        assert_eq!(
+            twin.request, t.request,
+            "{}: twin {} must use the SAME request, or the pair compares two \
+             different tasks rather than the document's effect",
+            t.id,
+            twin.id
+        );
+    }
+}
 #[test]
 fn task_ids_are_unique() {
     let mut ids: Vec<&str> = MODEL_CORPUS.iter().map(|t| t.id).collect();
