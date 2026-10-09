@@ -13,7 +13,7 @@ Windows, zero failures, zero clippy warnings on either. The gap between the two
 counts is the Linux-only sandbox, quarantine, and seccomp suites.
 
 The live model arm is verified separately, against a running Ollama with
-`llama3.2:3b`: 3 runs × 14 tasks × 2 arms. It is not part of either count.
+`llama3.2:3b`: 3 runs x 14 tasks x 2 arms. It is not part of either count.
 
 ---
 
