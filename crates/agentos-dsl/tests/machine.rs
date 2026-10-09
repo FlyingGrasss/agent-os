@@ -57,10 +57,25 @@ impl ToolHost for Recorder {
         tool: &str,
         args: &BTreeMap<String, PlanValue>,
     ) -> Result<PlanValue, PlanError> {
+        // The label is rendered alongside the value, and deliberately not omitted.
+        // `Quoted { text: "x" }` under `Trusted` and under `Tainted { .. }` are
+        // different values to everything downstream, and a harness printing only
+        // the data would call them identical — which would make this the one test
+        // in the file unable to fail on an I3 regression.
+        //
+        // Rendered as the *trust level*, not the whole `Label`. A `SourceId` is a
+        // random UUID minted per call, so printing it would make every run
+        // compare unequal to every other and the harness would report divergence
+        // on every tainted argument. Trust level is also the security-relevant
+        // property: it is what decides whether a value may reach a sensitive
+        // position.
         let rendered: Vec<String> = args
             .iter()
             .map(|(k, v)| {
-                let text = v.with_label_for_display(|d, _| format!("{d:?}"));
+                let text = v.with_label_for_display(|d, label| {
+                    let trust = if label.is_trusted() { "trusted" } else { "tainted" };
+                    format!("{d:?}@{trust}")
+                });
                 format!("{k}={text}")
             })
             .collect();
@@ -101,6 +116,14 @@ impl ToolHost for Recorder {
                     PlanData::record(vec![("name", PlanData::Str("also hostile".into()))]),
                 ]),
             ),
+            // A tool that fails hard rather than asking the user. Used to prove a failed
+            // statement is never silently retried.
+            "refuse" => {
+                return Err(PlanError::PolicyDenied {
+                    op: "refuse".into(),
+                    reason: "test fixture".into(),
+                })
+            }
             _ => Val::trusted(PlanData::Bool(true)),
         })
     }
@@ -143,6 +166,25 @@ struct Observed {
     events: usize,
 }
 
+/// Canonical outcome text for a halt.
+///
+/// The two implementations report a halt differently — `run` propagates
+/// `ConfirmationRequired`, the machine returns `Step::Halted` — so a halting
+/// program would compare as a divergence that is really an agreement. Both are
+/// mapped to this token, which is what lets the corpus include halting programs
+/// at all. Without them the differential test exercises none of the resume
+/// machinery, and that machinery is the only reason `Machine` exists.
+fn halt_token(op: &str) -> String {
+    format!("HALTED:{op}")
+}
+
+/// The tool the corpus recorder refuses.
+///
+/// Every halting corpus program calls `mail`, and no non-halting program does,
+/// so one fixed choice covers both cases without a per-entry flag. `mail` is the
+/// sensitive operation in this design, so refusing it is the realistic shape.
+const CORPUS_HALT_TOOL: &str = "mail";
+
 /// Run a program through the recursive interpreter.
 ///
 /// Returns the outcome — the report summaries, or the error text — alongside
@@ -150,7 +192,7 @@ struct Observed {
 fn run_recursive(source: &str) -> (Result<Vec<String>, String>, Observed) {
     let plan = parse(source).expect("parses");
     let log: Log = Rc::new(std::cell::RefCell::new(Vec::new()));
-    let mut host = Recorder::new(&log);
+    let mut host = Recorder::halting(&log, CORPUS_HALT_TOOL);
     let mut ex = Invoices;
     let result = match agentos_dsl::run(&plan, &mut host, &mut ex, Limits::default()) {
         Ok(outcome) => {
@@ -162,6 +204,14 @@ fn run_recursive(source: &str) -> (Result<Vec<String>, String>, Observed) {
             };
             (Ok(summaries), observed)
         }
+        Err(PlanError::ConfirmationRequired { op }) => (
+            Err(halt_token(&op)),
+            Observed {
+                calls: log.borrow().clone(),
+                reports: Vec::new(),
+                events: 0,
+            },
+        ),
         Err(e) => (
             Err(e.to_string()),
             Observed {
@@ -178,7 +228,7 @@ fn run_recursive(source: &str) -> (Result<Vec<String>, String>, Observed) {
 fn run_machine(source: &str) -> (Result<Vec<String>, String>, Observed) {
     let plan = parse(source).expect("parses");
     let log: Log = Rc::new(std::cell::RefCell::new(Vec::new()));
-    let mut host = Recorder::new(&log);
+    let mut host = Recorder::halting(&log, CORPUS_HALT_TOOL);
     let mut ex = Invoices;
     let mut machine = Machine::start(&plan).expect("starts");
 
@@ -188,7 +238,7 @@ fn run_machine(source: &str) -> (Result<Vec<String>, String>, Observed) {
         match machine.advance(&mut host, &mut ex) {
             Ok(Step::Advanced) => {}
             Ok(Step::Halted { op }) => {
-                outcome = Err(format!("halted at {op}"));
+                outcome = Err(halt_token(&op));
                 break;
             }
             Ok(Step::Done) => {
@@ -322,6 +372,31 @@ fn the_machine_agrees_with_run_on_every_shape() {
         (
             "a tool called in an argument and again as the loop source",
             r#"let s = seed(n = 2); for i in s { report(helper(key = "x")); }"#,
+        ),
+        // Halting programs. These reach the resume machinery, which is the only
+        // reason the machine exists. Each must agree with `run` right up to the
+        // halt: same tool calls, same arguments, same labels, halt on the same
+        // call. What happens *after* the halt is `run`'s absence, not a
+        // divergence, so the comparison stops at the halt.
+        (
+            "halt on the first call",
+            r#"let m = mail(to = "x");"#,
+        ),
+        (
+            "halt after a fetch and an extraction",
+            r#"let page = http.get(url = "https://x.test/1"); let inv = extract(Invoice, source = page); let m = mail(to = inv.0.note, subject = "s");"#,
+        ),
+        (
+            "halt on a nested argument call",
+            r#"let m = mail(to = helper(key = "k"));"#,
+        ),
+        (
+            "halt inside a loop body",
+            r#"let s = seed(n = 3); for i in s { report(mail(to = "x")); }"#,
+        ),
+        (
+            "halt on the second of two same-tool calls",
+            r#"let m = mail(subject = helper(key = "a"), body = helper(key = "b"));"#,
         ),
     ];
 
@@ -573,6 +648,59 @@ fn iterating_a_tainted_list_does_not_launder_its_elements() {
     );
 }
 
+/// After a hard failure the machine is finished; calling again must not re-run it.
+///
+/// A `ConfirmationRequired` halt is resumable, so the cursor deliberately stays
+/// put and the statement is retried. Every *other* error is terminal: the
+/// statement did not complete and its recorded tool results were discarded with
+/// it. Retrying would re-invoke tools that already ran.
+///
+/// This matters because `Machine` is an object and reads like something you drive
+/// in a retry loop: `loop { match advance { Err(e) => log(e), .. } }`. Without
+/// poison, that natural caller re-runs the failed statement with an empty cache —
+/// `helper` below ran six times for one intended call — and the audit log, which
+/// faithfully recorded all six, would describe a plan that had already stopped.
+#[test]
+fn a_hard_failure_poisons_the_machine_so_a_retry_reruns_nothing() {
+    let source = r#"let x = mail(subject = helper(key = "1"), body = refuse());"#;
+    let plan = parse(source).expect("parses");
+    let log: Log = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut ex = Invoices;
+    let mut machine = Machine::start(&plan).expect("starts");
+
+    let mut host = Recorder::new(&log);
+    let first = machine
+        .advance(&mut host, &mut ex)
+        .expect_err("refuse() must fail");
+    assert!(
+        matches!(first, PlanError::PolicyDenied { .. }),
+        "expected a hard failure, got {first:?}"
+    );
+    let calls_after_failure = log.borrow().len();
+    assert!(
+        calls_after_failure > 0,
+        "the fixture must actually have called a tool before failing"
+    );
+
+    // Retry, as a naive caller would. Nothing may happen.
+    for _ in 0..5 {
+        let mut host = Recorder::new(&log);
+        let again = machine
+            .advance(&mut host, &mut ex)
+            .expect_err("must still be failed");
+        assert_eq!(
+            again, first,
+            "a poisoned machine must report the same error, not a new one"
+        );
+    }
+    assert_eq!(
+        log.borrow().len(),
+        calls_after_failure,
+        "a poisoned machine must not invoke any tool: {:?}",
+        log.borrow()
+    );
+}
+
 /// A label must not weaken across a resume.
 ///
 /// The load-bearing property of resume. Expressions are re-evaluated, so if any
@@ -702,13 +830,16 @@ fn two_calls_to_one_tool_in_a_statement_do_not_share_a_cached_argument() {
     let helpers: Vec<&String> = calls.iter().filter(|c| c.starts_with("helper(")).collect();
     assert_eq!(
         helpers,
-        [r#"helper(key=Str("a"))"#, r#"helper(key=Str("b"))"#],
+        [
+            r#"helper(key=Str("a")@trusted)"#,
+            r#"helper(key=Str("b")@trusted)"#
+        ],
         "both helper calls must run, with their own arguments"
     );
     // Argument order is alphabetical because the recorder renders a `BTreeMap`.
     assert_eq!(
         calls.last().unwrap(),
-        r#"mail(body=Bool(true),subject=Bool(true))"#,
+        r#"mail(body=Bool(true)@trusted,subject=Bool(true)@trusted)"#,
         "the outer call receives both results, not one result twice"
     );
 }

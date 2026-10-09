@@ -149,6 +149,21 @@ pub struct Machine {
     frames: Vec<Frame>,
     reports: Vec<Report>,
     events: Vec<Event>,
+    /// The error that ended this machine, if it ended.
+    ///
+    /// A `ConfirmationRequired` halt is *not* terminal — that is what a resume
+    /// is for. Every other error is, because the statement did not complete and
+    /// the in-flight record was discarded with it. Retrying such a statement
+    /// would re-invoke tools that already ran, so instead the machine is
+    /// poisoned: it returns this error and does nothing else, forever.
+    ///
+    /// This exists because `Machine` is an object and reads like something you
+    /// drive in a retry loop. Without it, the natural caller
+    /// `loop { match advance { Err(e) => log(e), .. } }` silently re-runs the
+    /// failed statement, and a tool in argument position performs its effect a
+    /// second time — an audit log that faithfully recorded both attempts,
+    /// describing a plan that had already stopped.
+    poisoned: Option<PlanError>,
     /// Results of tool calls made while the current statement is in flight.
     ///
     /// Keyed by *call site* — the path of argument indices from the statement
@@ -172,6 +187,7 @@ impl Machine {
             frames: Vec::new(),
             reports: Vec::new(),
             events: Vec::new(),
+            poisoned: None,
             in_flight: BTreeMap::new(),
         }
     }
@@ -249,6 +265,12 @@ impl Machine {
         tools: &mut dyn ToolHost,
         extractor: &mut dyn Extractor,
     ) -> Result<Step, PlanError> {
+        // A machine that has already failed stays failed. Checked before
+        // anything else so a caller retrying in a loop cannot re-run the
+        // statement that failed and re-invoke the tools in it.
+        if let Some(err) = &self.poisoned {
+            return Err(err.clone());
+        }
         loop {
             // Decide from the frame stack, then release the borrow. Nothing is
             // mutated here: the cursor moves in the `Next::Exec` arm below, and
@@ -288,12 +310,10 @@ impl Machine {
                     continue;
                 }
                 Next::Exec { stmt, depth } => {
-                    // A statement already in flight keeps its recorded tool
-                    // results; a fresh one starts with a clean record.
-                    let resuming = !self.in_flight.is_empty();
-                    if !resuming {
-                        self.in_flight.clear();
-                    }
+                    // The in-flight record is cleared inside `exec`, which is the
+                    // only place that knows whether the statement completed or
+                    // halted. Nothing is cleared here: clearing unconditionally
+                    // would discard the record a resume needs.
                     let outcome = self.exec(&stmt, tools, extractor);
                     return match outcome {
                         Ok(()) => {
@@ -306,7 +326,15 @@ impl Machine {
                         // retries it. Skipping it here would mean an approved tool
                         // call never runs, which is a worse failure than the halt.
                         Err(PlanError::ConfirmationRequired { op }) => Ok(Step::Halted { op }),
-                        Err(other) => Err(other),
+                        // Terminal. The statement did not finish, so its recorded
+                        // tool results are gone; re-running it would repeat their
+                        // effects. The machine is poisoned rather than left in a
+                        // state where a retry means something different from what
+                        // the caller expects.
+                        Err(other) => {
+                            self.poisoned = Some(other.clone());
+                            Err(other)
+                        }
                     };
                 }
             }

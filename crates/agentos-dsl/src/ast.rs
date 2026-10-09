@@ -207,7 +207,7 @@ pub const MAX_LOOP_DEPTH: usize = 8;
 /// ~10k frames that overflow a default thread stack.
 pub const MAX_EXPR_DEPTH: usize = 64;
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum PlanError {
     #[error("loop nesting exceeds maximum depth {max}")]
     LoopTooDeep { max: usize },
