@@ -27,7 +27,12 @@ use agentos_types::{Label, SourceId, Val};
 /// encoding. A value that cannot be encoded cannot be shown to a user
 /// coherently either, so refusing to let it be confirmed is correct rather than
 /// an inconvenience.
-#[derive(Debug, Clone, serde::Serialize)]
+// `PartialEq` is not cosmetic: a halted `PendingConfirmation` has to carry the
+// values it halted on so that a grant can be computed from them, and matching a
+// user approval against the right request requires comparing those values. Two
+// requests can render identically while carrying different bytes, so comparing
+// the rendered text alone would let an approval be paired with the wrong one.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum PlanData {
     Unit,
     Bool(bool),

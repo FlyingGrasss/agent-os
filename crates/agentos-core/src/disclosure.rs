@@ -146,6 +146,17 @@ impl<'a> Disclosure<'a> {
         })
     }
 
+    /// The approved requests, in the order the user approved them.
+    ///
+    /// A resuming caller needs every one, not just the first: a single halted call
+    /// queues one pending record carrying every argument the engine flagged, and a
+    /// plan can queue several records across successive turns. Handing back the
+    /// whole list from the same place `approve` checks against is what keeps an
+    /// approval paired with the request it actually answers.
+    pub fn approved(&self) -> &[PendingConfirmation] {
+        &self.approved
+    }
+
     /// The approved request a caller should promote against, if there is one.
 ///
 /// A caller resuming a plan needs to know *which* halt the user's answer was to.

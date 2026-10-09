@@ -19,3 +19,7 @@ uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# The session tests build a `UserId` directly, the same way the eval rig does.
+uuid = { workspace = true }

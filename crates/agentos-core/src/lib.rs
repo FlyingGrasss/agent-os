@@ -2,7 +2,9 @@
 //! authoritative mint point for user confirmations.
 
 pub mod disclosure;
+pub mod session;
 #[cfg(test)]
 mod tests;
 
 pub use disclosure::{request_ops, Disclosure, Disposition, Resolution};
+pub use session::{Outcome, Session, DEFAULT_CONFIRMATION_LIMIT};

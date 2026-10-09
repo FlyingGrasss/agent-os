@@ -31,6 +31,14 @@ pub enum GrantError {
     /// The value could not be encoded for hashing.
     #[error("value could not be encoded for approval: {0}")]
     Encoding(String),
+    /// The pending confirmation does not describe a grantable request.
+    ///
+    /// Refused rather than silently skipped. A request naming an argument the
+    /// call did not carry, or naming none at all, means the pending record and
+    /// the call have come apart; granting part of it would approve something the
+    /// user did not see.
+    #[error("confirmation is not grantable: {0}")]
+    Unknown(String),
 }
 
 /// A tool the host is willing to run.
@@ -76,10 +84,43 @@ pub struct PolicyHost {
 }
 
 /// A halted call awaiting a user's decision.
+///
+/// Carries the arguments it halted on, not just a rendering of them. Two
+/// reasons, both about pairing an approval with the right thing:
+///
+/// - A grant's key is computed over `(scope, user, label, bytes)` of the actual
+///   value. `ConfirmationRequest` holds only rendered text, so a caller cannot
+///   compute a valid grant from it — and a caller that reconstructed the value
+///   itself would be reconstructing it from untrusted bytes, which is exactly
+///   where a substitution would slip in. Keeping the values here means the grant
+///   is derived from what the engine actually saw.
+/// - `Disclosure::approve` matches a value against the approved request. Two
+///   calls can produce byte-identical *requests* while carrying different
+///   arguments; without the arguments the match could pick the wrong one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingConfirmation {
     pub op: String,
     pub request: ConfirmationRequest,
+    /// The arguments as passed, with their labels.
+    ///
+    /// Private-by-convention: read it through [`PolicyHost::grant_pending`] or
+    /// [`Self::args`], never by rebuilding a value from `request.value`.
+    args: BTreeMap<String, Val<PlanData>>,
+}
+
+impl PendingConfirmation {
+    /// The argument the engine flagged for confirmation, by name.
+    pub fn arg(&self, name: &str) -> Option<&Val<PlanData>> {
+        self.args.get(name)
+    }
+
+    /// Every flagged argument, in the order the engine listed them.
+    pub fn args(&self) -> impl Iterator<Item = (&str, &Val<PlanData>)> {
+        self.request
+            .items
+            .iter()
+            .filter_map(move |item| self.args.get(&item.arg).map(|v| (item.arg.as_str(), v)))
+    }
 }
 
 impl PolicyHost {
@@ -181,6 +222,47 @@ impl PolicyHost {
             Ok(key) => self.grants.remove(&(scope.to_string(), key)).is_some(),
             Err(_) => false,
         }
+    }
+
+    /// Grant every argument a halted call was waiting on, using the values the
+    /// engine actually saw.
+    ///
+    /// This is the path production code should use, in preference to
+    /// [`Self::grant`] with a caller-supplied value. Two reasons:
+    ///
+    /// **The value cannot be substituted.** `grant` takes a `Val` from the
+    /// caller, and the caller would have to have obtained it from somewhere —
+    /// most plausibly by re-deriving it from the plan or from the rendered
+    /// request. A grant computed from a re-derived value either matches the real
+    /// one or is inert; there is no third outcome, but there is also no reason to
+    /// take the risk when the host is holding the real thing.
+    ///
+    /// **Every flagged argument is granted, not just the first.** `op` is built
+    /// from `request.items.first()`, so a call with `to` and `body` both tainted
+    /// reports a single `op`. A grant keyed on `op` would cover one argument while
+    /// the engine still asks about two — and `confirm_is_fully_granted` requires
+    /// all of them, so it would simply not take effect. Granting per item here
+    /// means a user who saw both arguments and said yes unblocks both, and a user
+    /// who saw one cannot, because the rest were never granted.
+    ///
+    /// `grant` remains public because it is the primitive, and the tests need to
+    /// exercise the grant mechanism directly.
+    pub fn grant_pending(&mut self, pending: &PendingConfirmation) -> Result<(), GrantError> {
+        if pending.request.items.is_empty() {
+            return Err(GrantError::Unknown(
+                "confirmation request names no arguments, so there is nothing to grant".into(),
+            ));
+        }
+        for item in &pending.request.items {
+            let Some(value) = pending.args.get(&item.arg) else {
+                return Err(GrantError::Unknown(format!(
+                    "confirmation request names `{}` but the call did not carry it",
+                    item.arg
+                )));
+            };
+            self.grant(&format!("{}.{}", pending.request.tool, item.arg), value)?;
+        }
+        Ok(())
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
@@ -336,6 +418,7 @@ impl ToolHost for PolicyHost {
                 self.pending.push(PendingConfirmation {
                     op: op.clone(),
                     request,
+                    args: args.clone(),
                 });
                 Err(PlanError::ConfirmationRequired { op })
             }
