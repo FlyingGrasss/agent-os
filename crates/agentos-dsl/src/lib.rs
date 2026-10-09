@@ -8,6 +8,7 @@
 mod ast;
 mod data;
 mod interp;
+pub mod machine;
 #[cfg(test)]
 mod tests;
 mod parser;
@@ -15,4 +16,5 @@ mod parser;
 pub use ast::{Arg, Expr, Literal, Plan, PlanError, Stmt, MAX_EXPR_DEPTH, MAX_LOOP_DEPTH};
 pub use data::{PlanData, PlanValue};
 pub use interp::{run, Extractor, Interp, Limits, Outcome, Report, ToolHost};
+pub use machine::{Machine, Step};
 pub use parser::parse;
