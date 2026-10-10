@@ -1,4 +1,4 @@
-﻿//! The Controller: session state, the disclosure round trip, and the
+//! The Controller: session state, the disclosure round trip, and the
 //! authoritative mint point for user confirmations.
 
 pub mod controller;

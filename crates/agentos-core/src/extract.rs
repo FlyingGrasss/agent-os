@@ -127,8 +127,176 @@ impl agentos_dsl::Extractor for ModelExtractor<'_> {
 
         let bound = bounds_from_schema(spec);
         enforce_bound(&data, bound.as_ref())?;
-        Ok(data)
+        coerce_to_schema(data, spec)
     }
+}
+
+/// Narrow every field to the type the schema declared.
+///
+/// # Why this exists and why it is not the same as `enforce_bound`
+///
+/// A length bound **shrinks** the forwarding surface. It does not remove it. A
+/// 96-character injection still fits in 96 characters, which is why the bounded
+/// arm of the measurement still forwarded 56 bytes and only stopped one task.
+///
+/// A closed type **removes** it. A schema declaring `status: {enum: ["paid",
+/// "unpaid", "overdue"]}` admits exactly three values, and the value that comes
+/// out is one of the three strings the Controller wrote in the schema. Whatever
+/// the document said, it cannot be forwarded, because it is not one of the
+/// allowed values -- it fails to match and the extraction is refused.
+///
+/// That is the structural answer to forwarding, and it is the reason the earlier
+/// measurement's modest result is not the end of the story.
+///
+/// # Two things this deliberately does not do
+///
+/// **It does not clear taint.** A field coerced to `paid` is still tainted: the
+/// *choice* of that member was influenced by the document even though the
+/// *content* came from the schema. Clearing the label would let a short value
+/// skip confirmation entirely, which is the exact accident the bound's tests
+/// guard against. Taint is about provenance; a closed type is about content.
+/// Conflating them would trade one hole for another.
+///
+/// **It does not truncate or guess.** A value that does not fit its declared type
+/// is refused, naming the field and the type. Substituting a default would mean
+/// the plan proceeds on data the extractor never produced.
+fn coerce_to_schema(data: PlanData, spec: &serde_json::Value) -> Result<PlanData, PlanError> {
+    let Some(props) = spec.get("properties").and_then(|p| p.as_object()) else {
+        return Ok(data);
+    };
+    let PlanData::Record(fields) = data else {
+        // A non-record cannot be checked field by field. Refusing would break the
+        // common case of a schema whose root is a scalar, so it passes through and
+        // the length bound above is what constrains it.
+        return Ok(data);
+    };
+
+    let mut out = Vec::with_capacity(fields.len());
+    for (name, value) in fields {
+        match props.get(&name) {
+            Some(field_spec) => {
+                let coerced = coerce_field(&name, value, field_spec)?;
+                out.push((name, coerced));
+            }
+            // A field the schema does not declare is left alone. It is still
+            // bounded by `enforce_bound` above, so this is not an unbounded escape
+            // -- but it is not typed either, and a caller who wants every field
+            // checked should declare every field.
+            None => out.push((name, value)),
+        }
+    }
+    Ok(PlanData::Record(out))
+}
+
+fn coerce_field(
+    name: &str,
+    value: PlanData,
+    spec: &serde_json::Value,
+) -> Result<PlanData, PlanError> {
+    let kind = spec.get("type").and_then(serde_json::Value::as_str);
+
+    // Only string-shaped values are coerced. A JSON number or boolean that
+    // arrived already typed needs no work, and coercing it would be a chance to
+    // lose information for nothing.
+    let (text, source) = match value {
+        PlanData::Quoted { text, source } => (text, Some(source)),
+        PlanData::Str(text) => (text, None),
+        other => return Ok(other),
+    };
+
+    match kind {
+        // --- enum -----------------------------------------------------------
+        // The load-bearing case. The output is drawn from the schema's own list,
+        // never from the document.
+        Some("string") => {
+            let Some(allowed) = spec.get("enum").and_then(|e| e.as_array()) else {
+                return Ok(rebuild(text, source));
+            };
+            let normalised = normalise(&text);
+            let chosen = allowed
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .find(|candidate| normalise(candidate) == normalised)
+                .ok_or_else(|| PlanError::ToolRejected {
+                    tool: "extract".into(),
+                    reason: format!(
+                        "field `{name}` is not one of the values this schema allows; \
+                         a value outside a closed set has no forwarding surface, \
+                         which is the point of declaring one"
+                    ),
+                })?;
+            // Re-wrapped as the schema's own spelling, so the output is
+            // byte-identical to one of the declared values and nothing else --
+            // and rebuilt in the value's original *shape*, so a `Quoted` stays a
+            // `Quoted`. Turning a lifted value into planner-authored `Str` text
+            // would launder a label, which is the one thing this function must
+            // never do.
+            Ok(rebuild(chosen.to_string(), source))
+        }
+
+        // --- integer --------------------------------------------------------
+        Some("integer") => {
+            // Digits with optional separators and a leading sign. Deliberately
+            // not `parse::<i64>()` on the raw text: that accepts forms the schema
+            // author did not write down.
+            let cleaned: String = text
+                .trim()
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != '_' && *c != ',')
+                .collect();
+            match cleaned.parse::<i64>() {
+                Ok(n) => Ok(PlanData::Int(n)),
+                Err(_) => Err(PlanError::ToolRejected {
+                    tool: "extract".into(),
+                    reason: format!(
+                        "field `{name}` is declared an integer and its value is not \
+                         one; an integer field has no forwarding surface, which is \
+                         the point of declaring it"
+                    ),
+                }),
+            }
+        }
+
+        // --- boolean --------------------------------------------------------
+        Some("boolean") => {
+            let t = text.trim().to_ascii_lowercase();
+            match t.as_str() {
+                "true" | "yes" | "1" => Ok(PlanData::Bool(true)),
+                "false" | "no" | "0" => Ok(PlanData::Bool(false)),
+                _ => Err(PlanError::ToolRejected {
+                    tool: "extract".into(),
+                    reason: format!(
+                        "field `{name}` is declared a boolean and `{t}` is not one"
+                    ),
+                }),
+            }
+        }
+
+        _ => Ok(rebuild(text, source)),
+    }
+}
+
+/// Rebuild a string-shaped value, preserving whether it was lifted or authored.
+///
+/// The distinction is load-bearing and the reason this is not a one-liner:
+/// `PlanData::Str` is what the Controller can read as its own, and `Quoted`
+/// carries the source it must treat as untrusted. A coercion that swapped one for
+/// the other would be laundering a label while appearing to be sanitising a
+/// value -- the exact substitution this whole file exists to prevent.
+fn rebuild(text: String, source: Option<agentos_types::SourceId>) -> PlanData {
+    match source {
+        Some(src) => PlanData::Quoted { text, source: src },
+        None => PlanData::Str(text),
+    }
+}
+
+/// Case- and whitespace-insensitive, so `"PAID"` matches a schema's `"paid"`.
+///
+/// Without this, an extraction would be refused for a reason that is not a
+/// security problem, and the natural response -- to stop declaring enums -- would
+/// undo the control.
+fn normalise(s: &str) -> String {
+    s.trim().to_ascii_lowercase()
 }
 
 /// The character ceiling a schema declares for its string fields.

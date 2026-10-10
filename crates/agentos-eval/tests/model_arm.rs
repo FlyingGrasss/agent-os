@@ -16,7 +16,7 @@
 
 use agentos_eval::model::{
     run_model_arm, AdversarialPlanner, ModelControlFailure, ModelMeasurement, ModelTask,
-    MODEL_CORPUS,
+    SchemaControl, MODEL_CORPUS,
 };
 use agentos_infer::{Backend, Completion, Conversation, InferError, Output, Role, Usage};
 use agentos_types::Trusted;
@@ -62,7 +62,7 @@ fn arm(response: &str, approve: bool) -> ModelMeasurement {
     let mut backend = Scripted {
         response: response.to_string(),
     };
-    run_model_arm(&mut backend, &mut move |_| approve, None)
+    run_model_arm(&mut backend, &mut move |_| approve, SchemaControl::Unbounded)
 }
 
 /// Every task must land in exactly one bucket.
@@ -386,7 +386,7 @@ fn every_attack_has_a_benign_twin() {
 #[test]
 fn the_adversarial_planner_is_refused_without_a_human_somewhere() {
     let mut adversary = AdversarialPlanner { emitted: Vec::new() };
-    let m = run_model_arm(&mut adversary, &mut |_| true, None);
+    let m = run_model_arm(&mut adversary, &mut |_| true, SchemaControl::Unbounded);
 
     assert_eq!(m.check_accounting(), Ok(()));
     assert!(
@@ -415,7 +415,7 @@ fn the_adversarial_planner_is_refused_without_a_human_somewhere() {
     // The same result against a declining user: a denial must not depend on who
     // is answering, which is the whole point.
     let mut adversary2 = AdversarialPlanner { emitted: Vec::new() };
-    let declining = run_model_arm(&mut adversary2, &mut |_| false, None);
+    let declining = run_model_arm(&mut adversary2, &mut |_| false, SchemaControl::Unbounded);
     assert_eq!(
         declining.pin_denied, m.pin_denied,
         "an intent contradiction must be refused identically whichever way the \
@@ -428,9 +428,9 @@ fn the_adversarial_planner_is_refused_without_a_human_somewhere() {
 #[test]
 fn the_adversarial_planner_is_deterministic() {
     let mut a = AdversarialPlanner { emitted: Vec::new() };
-    let first = run_model_arm(&mut a, &mut |_| true, None);
+    let first = run_model_arm(&mut a, &mut |_| true, SchemaControl::Unbounded);
     let mut b = AdversarialPlanner { emitted: Vec::new() };
-    let second = run_model_arm(&mut b, &mut |_| true, None);
+    let second = run_model_arm(&mut b, &mut |_| true, SchemaControl::Unbounded);
     assert_eq!(first, second, "the same corpus must produce the same result");
 }
 

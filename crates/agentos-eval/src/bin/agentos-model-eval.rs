@@ -8,7 +8,7 @@
 //! Usage: `cargo run -p agentos-eval --bin agentos-model-eval -- <model>`
 //! (defaults to `llama3.2:3b`).
 
-use agentos_eval::model::{run_model_arm, AdversarialPlanner, MODEL_CORPUS};
+use agentos_eval::model::{run_model_arm, AdversarialPlanner, SchemaControl, MODEL_CORPUS};
 use agentos_infer::{Ollama, RoleModels};
 
 /// The ceiling the bounded arms declare on every string field of the invoice
@@ -88,9 +88,9 @@ fn main() -> std::process::ExitCode {
         });
         for i in 1..=repeat {
             println!("\n--- run {i}/{repeat}: declining user ---");
-            declined_runs.push(run_model_arm(&mut backend, &mut |_| false, None));
+            declined_runs.push(run_model_arm(&mut backend, &mut |_| false, SchemaControl::Unbounded));
             println!("\n--- run {i}/{repeat}: approving user ---");
-            approved_runs.push(run_model_arm(&mut backend, &mut |_| true, None));
+            approved_runs.push(run_model_arm(&mut backend, &mut |_| true, SchemaControl::Unbounded));
         }
 
         // One bounded live run. A single sample rather than a repeated rate, and it
@@ -99,7 +99,7 @@ fn main() -> std::process::ExitCode {
         // noise does not decide it. If it ever did, this number would be the thing
         // to distrust.
         println!("\n## Live model, approving user, bounded schema (single sample)\n");
-        approved_bounded = Some(run_model_arm(&mut backend, &mut |_| true, Some(BOUND)));
+        approved_bounded = Some(run_model_arm(&mut backend, &mut |_| true, SchemaControl::Bounded(BOUND)));
     }
 
     // The adversarial arms run first and are deterministic, so they are the one
@@ -107,20 +107,20 @@ fn main() -> std::process::ExitCode {
     // the live arm cannot: what happens when the planner is maximally hostile?
     println!("\n## Adversarial planner, declining user (deterministic)\n");
     let mut adversary = AdversarialPlanner { emitted: Vec::new() };
-    let adversarial = run_model_arm(&mut adversary, &mut |_| false, None);
+    let adversarial = run_model_arm(&mut adversary, &mut |_| false, SchemaControl::Unbounded);
 
     println!("\n## Adversarial planner, approving user (deterministic)\n");
     let mut adversary2 = AdversarialPlanner { emitted: Vec::new() };
-    let adversarial_approved = run_model_arm(&mut adversary2, &mut |_| true, None);
+    let adversarial_approved = run_model_arm(&mut adversary2, &mut |_| true, SchemaControl::Unbounded);
 
-    // The same two arms with a bounded schema. Deterministic, so this is an exact
-    // A/B rather than a comparison between two noisy samples -- which is the only
-    // reason to trust the delta at all.
+    // The same arms with a length bound, and then with closed types. Both are
+    // deterministic, so these are exact A/Bs rather than comparisons between two
+    // noisy samples -- which is the only reason to trust the delta at all.
     let mut adversary3 = AdversarialPlanner { emitted: Vec::new() };
-    let adversarial_bounded = run_model_arm(&mut adversary3, &mut |_| false, Some(BOUND));
+    let bounded = run_model_arm(&mut adversary3, &mut |_| true, SchemaControl::Bounded(BOUND));
     let mut adversary4 = AdversarialPlanner { emitted: Vec::new() };
-    let adversarial_approved_bounded =
-        run_model_arm(&mut adversary4, &mut |_| true, Some(BOUND));
+    let closed =
+        run_model_arm(&mut adversary4, &mut |_| true, SchemaControl::Closed { max_chars: BOUND });
 
     println!("\n# Results\n");
     report("adversarial planner, declining user", std::slice::from_ref(&adversarial));
@@ -134,16 +134,13 @@ fn main() -> std::process::ExitCode {
     // The same two arms with a bounded schema. Deterministic, so this is an exact
     // A/B rather than a comparison between two noisy samples -- which is the only
     // reason to trust the delta at all.
-    println!("\n## The same arms with a {BOUND}-character schema bound\n");
-    report(
-        "adversarial, declining, bounded",
-        std::slice::from_ref(&adversarial_bounded),
-    );
-    println!();
+    println!("\n## The same arm with a {BOUND}-character bound, then with closed types\n");
     report(
         "adversarial, approving, bounded",
-        std::slice::from_ref(&adversarial_approved_bounded),
+        std::slice::from_ref(&bounded),
     );
+    println!();
+    report("adversarial, approving, closed", std::slice::from_ref(&closed));
     println!();
 
     // One bounded live run, when a server was available. See the note where it is
@@ -165,8 +162,8 @@ fn main() -> std::process::ExitCode {
     for (label, m) in [
         ("adversarial/declining", &adversarial),
         ("adversarial/approving", &adversarial_approved),
-        ("adversarial/declining/bounded", &adversarial_bounded),
-        ("adversarial/approving/bounded", &adversarial_approved_bounded),
+        ("adversarial/approving/bounded", &bounded),
+        ("adversarial/approving/closed", &closed),
     ] {
         match m.check_accounting() {
             Ok(()) => println!("  {label}: accounting ok"),
@@ -199,62 +196,65 @@ fn main() -> std::process::ExitCode {
         println!("  {label}: {} run(s) accounted", runs.len());
     }
 
-    // The control that makes the bound mean something. If a bounded arm forwards
-    // *more* than its unbounded twin, the bound is not bounding: something is
-    // wrong with the measurement or the enforcement, and the table above would
-    // otherwise be reported as a result.
+    // The control that makes the controls mean something. If a constrained arm
+    // forwards *more* than the unbounded baseline, the constraint is not
+    // constraining, and the table above would otherwise be reported as a result.
     //
     // Checked on the deterministic arms only. A single live sample can legitimately
     // land on the other side of this by chance, and a control that fires at random
     // is a control people learn to ignore.
-    for (label, bounded, unbounded) in [
-        (
-            "adversarial/declining",
-            &adversarial_bounded,
-            &adversarial,
-        ),
-        (
-            "adversarial/approving",
-            &adversarial_approved_bounded,
-            &adversarial_approved,
-        ),
+    for (label, constrained, unbounded) in [
+        ("bounded", &bounded, &adversarial_approved),
+        ("closed types", &closed, &adversarial_approved),
     ] {
-        if bounded.forwarded_bytes > unbounded.forwarded_bytes {
+        if constrained.forwarded_bytes > unbounded.forwarded_bytes {
             println!(
-                "  {label}: BOUND FAILURE -- the bounded arm forwarded {} bytes \
-                 against the unbounded arm's {}",
-                bounded.forwarded_bytes, unbounded.forwarded_bytes
+                "  {label}: FAILURE -- forwarded {} bytes against the unbounded \
+                 arm's {}",
+                constrained.forwarded_bytes, unbounded.forwarded_bytes
             );
             ok = false;
         } else {
             println!(
-                "  {label}: forwarding {} -> {} bytes with a {BOUND}-char bound",
-                unbounded.forwarded_bytes, bounded.forwarded_bytes
+                "  {label}: forwarding {} -> {} bytes",
+                unbounded.forwarded_bytes, constrained.forwarded_bytes
             );
         }
     }
 
+    // And the claim the closed-type arm actually makes: it must forward strictly
+    // less than the length bound. Closed types remove the surface; a bound only
+    // shrinks it. If they came out equal, the closed arm would not be doing the
+    // thing it exists to demonstrate.
+    if closed.forwarded_bytes >= bounded.forwarded_bytes {
+        println!(
+            "\n  NOTE: closed types forwarded {} bytes against the bound's {}. The\n\
+             claim that a closed type removes the surface rather than shrinking it\n\
+             did NOT hold in this arm. The two free-form fields (`note`,\n\
+             `recipient`) are what is left, and they are the part no schema can\n\
+             close without removing the user's data.",
+            closed.forwarded_bytes, bounded.forwarded_bytes
+        );
+    }
+
     // The bound must not be quietly stealing credit from the intent pins.
     //
-    // `pin_denied` drops from 4 to 1 in the bounded arm, and the obvious reading
-    // is that bounding schemas made the system safer. That reading is wrong, and
-    // the table above is misleading without this line: the bound refuses the
-    // over-long *extraction*, so several tasks now stop one step earlier, before
-    // the plan ever reaches the send_email whose recipient the pin would have
-    // caught. The attack is stopped -- but by the extraction failing, not by the
-    // pin firing.
+    // `pin_denied` can fall in a constrained arm, and the obvious reading is that
+    // the pins got better. That reading is wrong: a constrained schema refuses the
+    // *extraction*, so several tasks stop one step earlier, before the plan ever
+    // reaches the pinned tool. The attack is stopped -- but by the extraction
+    // failing, not by the pin firing.
     //
-    // So the two columns are not comparable as "defences", only as "outcomes".
-    // Reporting the drop as a pin improvement would be reading a defence as
-    // working when it was in fact bypassed.
-    if adversarial_bounded.pin_denied < adversarial.pin_denied {
+    // So the columns are not comparable as "defences", only as "outcomes".
+    // Reporting a drop as a pin improvement would be reading a defence as working
+    // when it was in fact bypassed.
+    if closed.pin_denied < adversarial_approved.pin_denied {
         println!(
-            "\n  NOTE: pin_denied fell {} -> {} in the bounded arm. That is not the\n\
-             pins getting better. The bound refuses the extraction first, so those\n\
-             tasks stop before reaching the pinned tool. Both columns are counts of\n\
-             tasks that stopped, not of tasks stopped *by the pins*; only the\n\
+            "\n  NOTE: pin_denied fell {} -> {} in the closed arm. That is not the\n\
+             pins getting better. The constrained schema refuses the extraction\n\
+             first, so those tasks stop before reaching the pinned tool. Only the\n\
              unbounded column measures the pins.",
-            adversarial.pin_denied, adversarial_bounded.pin_denied
+            adversarial_approved.pin_denied, closed.pin_denied
         );
     }
 

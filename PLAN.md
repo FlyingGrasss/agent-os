@@ -53,7 +53,28 @@ The live model arm is verified separately, against a running Ollama with
 
   **The confound, stated plainly:** `pin_denied` fell 4 -> 1 in the bounded arm, and reading that as "the pins got better" would be wrong. The bound refuses the *extraction*, so those tasks stop one step earlier, before the plan ever reaches the pinned tool. The attack is stopped -- by the extraction failing, not by the pin firing. The two columns count tasks that stopped, not tasks stopped *by the pins*; only the unbounded column measures the pins. The binary prints this note itself, so the table cannot be quietly misread later.
 
-  **What this says about the hypothesis.** Schema tightness was the proposed lever and it is only partly right. A character bound shrinks the payload; it does not change whether forwarding is legitimate. Since the user asked for the note to be emailed, forwarding prose is what they requested, and any bound loose enough to carry a legitimate note also carries an attack. The next move is tighter *types* (`enum`, `date`, integer cents) rather than tighter *lengths* -- a schema with no free-form string field has nothing to forward at all. That is a larger change to the extraction layer and is **not done**.
+  **What this says about the hypothesis.** Schema tightness was the proposed lever and it is only partly right. A character bound shrinks the payload; it does not change whether forwarding is legitimate. Since the user asked for the note to be emailed, forwarding prose is what they requested, and any bound loose enough to carry a legitimate note also carries an attack.
+
+- [x] **Closed types: the lever that actually works.** A schema field can declare `enum`, `integer`, or `boolean`, and the extraction is narrowed to it. An enum admits exactly the values the Controller wrote; anything else is refused, naming the field. An integer yields `PlanData::Int`. There is no fourth option in which attacker prose passes through. Deterministic A/B, adversarial planner, approving user:
+
+  | | leak rate | bytes forwarded |
+  |---|---|---|
+  | unbounded | 64.3% | 363 |
+  | 96-char bound | 62.5% | 307 |
+  | **closed types** | **56.2%** | **182** |
+
+  `model/status-injected` -- a document writing an instruction into a field the schema types as a closed enum -- is **refused with no value produced**, and does not appear in the closed arm's leak list. Its benign twin, carrying a legitimate `status=overdue`, still forwards in every arm, because the user asked for it.
+
+  **Coercion narrows content; it must not widen trust.** A field coerced to `paid` stays `Quoted` and therefore stays tainted: the *choice* of that member was influenced by the document even though the *content* came from the schema. Converting it to `Str` would launder a label while appearing to sanitise a value.
+
+  **The residual 182 bytes are the free-form fields, and no schema work removes them.** `note` is genuine prose and `recipient` is a genuine address. Closing a recipient would mean refusing to mail anyone not already on a list. The measurement says so rather than claiming a clean sweep.
+
+- [x] **Two broken instruments, found because a null result did not look like a null result.** The first run of the closed-type A/B produced **identical** byte counts for the bound and the closed arms. That was not a finding:
+  1. `footer` was left unconstrained in the closed schema while bounded in the other -- one arm accidentally weaker on the field under test.
+  2. Every attack in the corpus routes through `recipient`, `note` or `footer`, the three fields that genuinely cannot be closed, so the corpus could not tell the two controls apart at all.
+  3. Underneath both: the `Lift` fixture **hardcoded the status field** and never read the document, so the one task whose entire attack *is* the status line extracted a benign value.
+
+  Same failure as advertising tool names that do not exist: **a fixture internally consistent with itself measures perfectly and means nothing.** All three fixed, and two tasks added -- an attack on a typed field and its benign twin.
 - [x] **Extraction bridge** (`agentos_core::ModelExtractor`) — the missing link between the quarantined processor, which returns JSON, and the plan language, which needs `PlanData`. Every string in an extraction becomes `PlanData::Quoted`, so attacker text can never arrive as a planner-authored `Str`. The schema table is Controller-built; a plan cannot choose the shape of what it learns.
 - [x] **The confirmation prompt now shows the value.** Found by a test failing while writing the bridge above: the user was asked to approve `send_email(to = <structured value>)`. That is not a conservative default, it is a broken one — a user asked to approve an invisible value has nothing to read and one available answer, so the "human in the loop" is a rubber stamp while every approval is still recorded as deliberate. `ArgView` now carries a display rendering separate from the text the *rules* inspect, so quarantined text reaches the person deciding and still cannot be pattern-matched by a rule or written to the audit log. Control characters are stripped, because the value is attacker-controlled and the destination is a terminal.
 - [x] **Planner** (`agentos_core::Planner`) — the last missing piece between a task and a plan. Assembles its own conversation, so the planner's prompt is fixed text plus a `Trusted` task with **no parameter through which untrusted bytes could arrive**; I1 is enforced by the API's shape rather than by a check somebody has to remember. Model JSON is rendered into plan-language source and **fails closed** — an unrecognised operation, a missing field, a statement count over the bound, or a newline inside a field all refuse the whole plan, because silently skipping one would produce a task recorded as completed that did less than the model asked for.
