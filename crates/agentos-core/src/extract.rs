@@ -160,7 +160,7 @@ impl agentos_dsl::Extractor for ModelExtractor<'_> {
 /// **It does not truncate or guess.** A value that does not fit its declared type
 /// is refused, naming the field and the type. Substituting a default would mean
 /// the plan proceeds on data the extractor never produced.
-fn coerce_to_schema(data: PlanData, spec: &serde_json::Value) -> Result<PlanData, PlanError> {
+pub fn coerce_to_schema(data: PlanData, spec: &serde_json::Value) -> Result<PlanData, PlanError> {
     let Some(props) = spec.get("properties").and_then(|p| p.as_object()) else {
         return Ok(data);
     };

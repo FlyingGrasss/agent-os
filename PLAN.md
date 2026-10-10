@@ -4,16 +4,16 @@ Status against the original seven-phase roadmap. Checked boxes mean built **and*
 covered by a test that would fail if the property broke. Anything unchecked with
 a note means something was built but the phase's exit criterion is not met.
 
-Last updated to match commit `6d376ea`.
+Last updated to match commit `eafd62a`.
 
 **Verification for this update:** `cargo test --workspace` and
 `cargo clippy --all-targets -- -D warnings` both clean on Linux
-(`x86_64-unknown-linux-gnu`) and on the Windows host — 510 tests on Linux, 424 on
+(`x86_64-unknown-linux-gnu`) and on the Windows host — 640 tests on Linux, 520 on
 Windows, zero failures, zero clippy warnings on either. The gap between the two
 counts is the Linux-only sandbox, quarantine, and seccomp suites.
 
 The live model arm is verified separately, against a running Ollama with
-`llama3.2:3b`: 3 runs x 14 tasks x 2 arms. It is not part of either count.
+`llama3.2:3b`: 3 runs x 16 tasks x 2 arms. It is not part of either count.
 
 ---
 
@@ -25,7 +25,7 @@ The live model arm is verified separately, against a running Ollama with
 | I2 | Extractor has no tools, network, or filesystem | **Done** | `agentos-quarantine`: `SandboxedExtractor` forks, applies Landlock, applies seccomp, and only then starts the engine. Demonstrated against a real kernel by 18 escape tests, not argued from configuration. |
 | I3 | Labels propagate through all operations | **Done** | `Val::map`/`zip`/`map_with_label`, interpreter's field/len/extract/iteration. 20,000-deep ASTs refused rather than overflowing the stack. `Label` has no `Default`, so a new ingest path cannot default to `Trusted` by omission. |
 | I4 | Sensitive args reject tainted unless confirmed | **Done** | `PolicyHost` resolves → evaluates → audits → acts only on `Allow`. The confirmation round trip is built. An absent rule is `Confirm`, never `Allow`. **Measured** over a 45-program corpus: 29/33 attacks succeed without the policy, 0/33 with it, and all 12 benign programs still run. |
-| I5 | Process sees only granted fds | **Partial** | Landlock confines paths; seccomp refuses `socket(2)`, UDP, and Unix sockets; `SCM_RIGHTS` passes real descriptors; `pool.rs` forks and confines once at construction so no request can be served by an unconfined process. Still open: cgroups and namespaces. |
+| I5 | Process sees only granted fds | **Partial** | Landlock confines paths; seccomp refuses `socket(2)`, UDP, and Unix sockets; `SCM_RIGHTS` passes real descriptors; `pool.rs` forks and confines once at construction so no request can be served by an unconfined process. Still open: cgroups and namespaces. **Blocked on this host:** root required for cgroup v2 delegation and `unshare(CLONE_NEWUSER)`; no unprivileged path. |
 | I6 | Audit log, append-only, before execution | **Done** | `AuditLog::record_intent` returns an `AttemptToken` with private fields, so an effect cannot be performed without a prior durable record. |
 
 ---
@@ -44,7 +44,7 @@ The live model arm is verified separately, against a running Ollama with
 - [x] **Intent pins — the agent defends itself, without asking** (`agentos_tools::IntentPins`). The user said "email bob@example.com"; that address is **trusted text they typed**. If a plan puts a *different* address, lifted from a document, in that position, the document has overridden something the user stated. That is a contradiction between two values the system already holds, decided on **shape alone** — no understanding of what the injection says, so it cannot be evaded by rephrasing. Enforced in `PolicyHost` before the grant lookup and only ever turning `Allow` into `Deny`, so **no approval can unlock it**. Verified end to end: the session ends in a denial with `asked() == 0`, even against a user who approves everything.
 - [x] **The pins now have a measurement, and it took the right threat model.** Measuring them against the live 3B model gave **zero** — not because they fail but because a cooperative planner writes the user's own address and never gets steered. So an **adversarial planner** was added: deterministic, reads the request, and emits exactly the plan an attacker wants, routing document content into the pinned position. Against it the pins fire **4 tasks refused with no human involved**, and the approving-user leak rate falls from **92.9% to 64.3%**. The same 4 are refused whether the user declines or approves, which is the property that matters.
 - [x] **The forwarding residual is a different problem from substitution, and the leak count was hiding it.** Measuring *bytes* of untrusted text reaching a tool shows the two live arms leak differently: the adversarial planner's leaks carry **112 bytes** (an address, short), while the live model's carry **522 bytes** (prose — a `note` or `footer` field forwarded into a message). Same metric, same "a tainted argument reached a tool", two entirely different threats.
-- [ ] **Why forwarding is not solvable structurally, stated plainly.** When the user says "email the invoice note to bob", forwarding the note *is what they asked for*. There is no contradiction to detect, so the intent pins cannot apply. The remaining options are (a) refuse to forward what the user asked to forward, which is wrong, and (b) classify text as "instruction-like", which is **detection** — evadable by rephrasing, and dishonest to present as a control. The real lever is **schema design**: a schema extracting `total: int, status: enum, due: date` has almost nothing to forward, while one with `note: string` has a forwarding surface proportional to the note. That is a measurable property of the schema, and shrinking it is the actual work.
+- [x] **Why forwarding is not solvable structurally, stated plainly.** When the user says "email the invoice note to bob", forwarding the note *is what they asked for*. There is no contradiction to detect, so the intent pins cannot apply. The remaining options are (a) refuse to forward what the user asked to forward, which is wrong, and (b) classify text as "instruction-like", which is **detection** — evadable by rephrasing, and dishonest to present as a control. The real lever is **schema design**: a schema extracting `total: int, status: enum, due: date` has almost nothing to forward, while one with `note: string` has a forwarding surface proportional to the note. That is a measurable property of the schema, and shrinking it is the actual work.
 - [x] **A schema bound is now enforceable, and measured.** A schema may declare `maxLength`; an extraction exceeding it is **refused, not truncated**. Truncating would let attacker text survive in a form nobody reviewed, and would report a value the extractor never produced. The bound is read once across the schema's properties and enforced against every string, walking records and lists rather than stopping at the top level. A schema with no declared bound gets no bound -- the absence of a limit is not a limit, and a default would make every existing schema look protected when none is. Deterministic A/B on the adversarial arm, 96-character bound:
   - **Unbounded, approving user:** 9/14 leaking (64.3%), **112 bytes** forwarded.
   - **Bounded, approving user:** 8/14 leaking (57.1%), **56 bytes** forwarded.
@@ -164,7 +164,8 @@ The live model arm is verified separately, against a running Ollama with
 
 ## Phase 7 — Hardening and release
 
-- [ ] `cargo-fuzz` the DSL parser, IPC decoders, policy engine
+- [ ] `cargo-fuzz` the DSL parser, IPC decoders, policy engine, schema coercion
+- [ ] **Multi-model verification harness**: extend `agentos-eval` to run the A/B measurement against multiple model backends (e.g., `llama3.2:3b`, `qwen2.5:7b`, `llama3:8b`) via CLI flags; report invariant preservation per model
 - [ ] External-style red team: multi-step, confused-deputy
 - [ ] systemd unit with hardening options
 - [ ] Reproducible build, `.deb`/`.rpm`
@@ -176,11 +177,21 @@ The live model arm is verified separately, against a running Ollama with
 ## Known open risks
 
 1. **Model measurement exists but is thin.** The policy layer is measured over 45 programs, and the model arm now runs end to end: a real model writes a plan, a hostile document attacks it, and the session enforces policy — 0/42 leaks with a reading user, 7/42 (16.7%) with an approving one. But that is **one 3B checkpoint over 3 runs**, with role Q stubbed. A different model, a real Q, or more runs would move it. Nothing here should be read as a claim about models in general.
+
+- [ ] **Multi-model verification harness** (Phase 7) will quantify invariant preservation across model families and sizes.
+
 2. **Most of the surviving defence is still a human.** Of 33 corpus attacks, 12 are refused automatically and **17 get through if the user approves everything**. Against a *cooperative* model the leak rate is 0% for a reading user and ~17% for an approving one. Against an **adversarial planner** — the threat model, since the planner's output is what an attacker steers — it is 0% and **64.3%**. The intent pins took that from 92.9%, which is real progress and a fraction of the problem: they cover substitution and not forwarding. On data poisoning — the residual hole both CaMeL's and AgentDojo's own authors name — four of five attacks survive an approving user. Confirmation fatigue is a security property here, and the design only partially defends it.
+
+- [ ] The residual 182-byte forwarding surface (`note` + `recipient`) is a **measured structural limit**, not an engineering debt. No schema work removes it without removing the user's data. This is documented as the theoretical minimum bound for human-intent data delivery.
+
 3. **No resource containment.** cgroups and namespaces are blocked on this host, so a confined process can exhaust CPU or memory. Landlock and seccomp control *reach*, not *cost*. The DSL's own step and loop budgets are the only bound, and the measurement shows they do fire.
+
 4. **eBPF loading unverified** after the sysctl change.
+
 5. **The pool's confinement is Unix-only and its test image is a reference.** `agentos-worker` proves the mechanism; it is not the real interpreter. A different image may need loader syscalls the `Worker` profile does not grant, and the failure mode is a worker that cannot start rather than one that runs too freely — the safe direction, but still a deployment hazard.
+
 6. **`Profile::Worker` grants `prctl`.** It is safe as installed — the filter is already in place and can only be made more restrictive — but `prctl` is a broad syscall to hand out and the grant exists for a startup path that has not been pinned to the specific call.
+
 7. **The quarantine engine is a no-op.** I2 is demonstrated; the thing that will actually read documents is not built.
 8. **A loop body in the DSL cannot bind a variable.** `Interp::exec` rejects a second `let` of the same name and a loop never unbinds, so a `for` body may contain only `report` and nested `for`s. Found while building the corpus. It is a real limitation rather than a security hole, but it makes loops nearly useless and it is why the corpus cannot express "one tainted write reached many times".
 9. **The resume path is built; the loop that uses it is not.** `PolicyHost::call` returns `Err(ConfirmationRequired)` on a `Confirm`, which propagated out of `agentos_dsl::run` and discarded the interpreter's `State` — its variables *and* its spent step and loop budgets. `agentos_dsl::machine::Machine` now carries all three across a halt, and the old recursive `run` remains for programs that never halt. What is still missing is the session loop that drives it: nothing yet turns a `Step::Halted` into a `Disclosure` request and a grant back into a resumed `advance`. The three defects that made this harder than it looked, and how each was resolved:

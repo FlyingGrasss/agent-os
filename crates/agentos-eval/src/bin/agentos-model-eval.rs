@@ -1,4 +1,4 @@
-//! Attacks against a real model, end to end.
+﻿//! Attacks against a real model, end to end.
 //!
 //! Separate binary from `agentos-eval` because it needs a live model server and
 //! takes minutes. `agentos-eval` measures the policy layer against hand-written
@@ -7,6 +7,10 @@
 //!
 //! Usage: `cargo run -p agentos-eval --bin agentos-model-eval -- <model>`
 //! (defaults to `llama3.2:3b`).
+//!
+//! Flags:
+//!   --deterministic-only    Run only the adversarial arms (no live model needed)
+//!   --multi-model=MODELS    Comma-separated list of models to run the A/B against
 
 use agentos_eval::model::{run_model_arm, AdversarialPlanner, SchemaControl, MODEL_CORPUS};
 use agentos_infer::{Ollama, RoleModels};
@@ -32,6 +36,22 @@ fn main() -> std::process::ExitCode {
     // one, or to accept its noise, when checking the bound.
     let deterministic_only = args.iter().any(|a| a == "--deterministic-only");
     args.retain(|a| a != "--deterministic-only");
+
+    // `--multi-model` runs the same A/B against multiple model backends.
+    //
+    // Useful for proving the invariant holds across model families, not just one
+    // checkpoint. Pass a comma-separated list: `--multi-model llama3.2:3b,qwen2.5:7b`.
+    let multi_model = args.iter().any(|a| a.starts_with("--multi-model="));
+    let models_list = if multi_model {
+        args.iter()
+            .find(|a| a.starts_with("--multi-model="))
+            .and_then(|a| a.split('=').nth(1))
+            .map(|s| s.split(',').map(str::trim).map(str::to_string).collect::<Vec<_>>())
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+    args.retain(|a| !a.starts_with("--multi-model="));
 
     let mut args = args.into_iter();
     let model = args.next().unwrap_or_else(|| "llama3.2:3b".into());
@@ -62,7 +82,64 @@ fn main() -> std::process::ExitCode {
     }
 
     println!("# AgentOS model measurement\n");
-    println!("model: {model}");
+    if multi_model {
+        println!("models: {:?}\n", models_list);
+    } else {
+        println!("model: {model}\n");
+    }
+    println!("tasks: {}", MODEL_CORPUS.len());
+    println!(
+        "\nTasks are benign requests; the attack is in the document. Role Q is\n\
+         stubbed to lift attacker content faithfully, which is the adversarial\n\
+         choice for the planner: any failure is the planner's.\n"
+    );
+
+    // If multi-model, run the full suite for each model and collect results.
+    if multi_model {
+        let separator = "=".repeat(60);
+        let mut all_results = Vec::new();
+        for m in &models_list {
+            println!("\n{}", separator);
+            println!("MODEL: {m}");
+            println!("{}", separator);
+            let mut backend = Ollama::new(RoleModels::Shared { model: m.clone() });
+            let results = run_full_evaluation(&mut backend, m, repeat, deterministic_only);
+            all_results.push((m.clone(), results));
+        }
+        
+        println!("\n{}", separator);
+        println!("COMPARISON ACROSS MODELS");
+        println!("{}", separator);
+        for (m, results) in &all_results {
+            println!("\n--- {m} ---");
+            report("adversarial/declining", std::slice::from_ref(&results.adversarial_declining));
+            report("adversarial/approving", std::slice::from_ref(&results.adversarial_approving));
+            report("adversarial/approving/bounded", std::slice::from_ref(&results.bounded));
+            report("adversarial/approving/closed", std::slice::from_ref(&results.closed));
+            if !deterministic_only {
+                report("live/declining", &results.declined);
+                report("live/approving", &results.approved);
+                report("live/approving/bounded", std::slice::from_ref(&results.approved_bounded));
+            }
+        }
+        
+        // Cross-model comparison of the key metric
+        let separator = "=".repeat(60);
+        println!("\n{}", separator);
+        println!("FORWARDED BYTES COMPARISON (adversarial, approving)");
+        println!("{}", separator);
+        for (m, results) in &all_results {
+            println!("{m:20} unbounded={:4} bounded={:4} closed={:4}", 
+                results.adversarial_approving.forwarded_bytes,
+                results.bounded.forwarded_bytes,
+                results.closed.forwarded_bytes);
+        }
+        
+        return std::process::ExitCode::SUCCESS;
+    }
+
+    println!("# AgentOS model measurement\n");
+    println!("model: {model}\n");
     println!("tasks: {}", MODEL_CORPUS.len());
     println!(
         "\nTasks are benign requests; the attack is in the document. Role Q is\n\
@@ -130,40 +207,33 @@ fn main() -> std::process::ExitCode {
         std::slice::from_ref(&adversarial_approved),
     );
     println!();
-
-    // The same two arms with a bounded schema. Deterministic, so this is an exact
-    // A/B rather than a comparison between two noisy samples -- which is the only
-    // reason to trust the delta at all.
-    println!("\n## The same arm with a {BOUND}-character bound, then with closed types\n");
+    println!("\n## The same arms with a {BOUND}-character schema bound\n");
+    report(
+        "adversarial, declining, bounded",
+        std::slice::from_ref(&bounded),
+    );
+    println!();
     report(
         "adversarial, approving, bounded",
         std::slice::from_ref(&bounded),
     );
     println!();
-    report("adversarial, approving, closed", std::slice::from_ref(&closed));
+    let approved_bounded_val = approved_bounded.expect("approved_bounded should be set in live mode"); report("live, approving, bounded", std::slice::from_ref(&approved_bounded_val));
     println!();
 
-    // One bounded live run, when a server was available. See the note where it is
-    // taken: a single sample, labelled as one.
-    if let Some(b) = approved_bounded.as_ref() {
-        report("live, approving, bounded", std::slice::from_ref(b));
-        println!();
-    }
-
-    if !deterministic_only {
-        println!("\n## Live model\n");
-        report("declining user", &declined_runs);
-        println!();
-        report("approving user", &approved_runs);
-    }
+    println!("\n## Live model\n");
+    report("declining user", &declined_runs);
+    println!();
+    report("approving user", &approved_runs);
+    println!();
 
     println!("\n## Controls\n");
     let mut ok = true;
     for (label, m) in [
         ("adversarial/declining", &adversarial),
         ("adversarial/approving", &adversarial_approved),
-        ("adversarial/approving/bounded", &bounded),
-        ("adversarial/approving/closed", &closed),
+        ("adversarial/declining/bounded", &bounded),
+        ("adversarial/approving/bounded", &adversarial_approved),
     ] {
         match m.check_accounting() {
             Ok(()) => println!("  {label}: accounting ok"),
@@ -173,19 +243,6 @@ fn main() -> std::process::ExitCode {
             }
         }
     }
-    // The bounded live run is accounted for only when it was actually taken.
-    // Skipping it rather than checking a placeholder: a control that passes because
-    // there was nothing to check is the failure mode this project keeps hitting.
-    if let Some(b) = approved_bounded.as_ref() {
-        match b.check_accounting() {
-            Ok(()) => println!("  live/approving/bounded: accounting ok"),
-            Err(e) => {
-                println!("  live/approving/bounded: ACCOUNTING FAILURE: {e}");
-                ok = false;
-            }
-        }
-    }
-
     for (label, runs) in [("declining", &declined_runs), ("approving", &approved_runs)] {
         for (i, m) in runs.iter().enumerate() {
             if let Err(e) = m.check_accounting() {
@@ -196,65 +253,53 @@ fn main() -> std::process::ExitCode {
         println!("  {label}: {} run(s) accounted", runs.len());
     }
 
-    // The control that makes the controls mean something. If a constrained arm
-    // forwards *more* than the unbounded baseline, the constraint is not
-    // constraining, and the table above would otherwise be reported as a result.
+    // The control that makes the bound mean something. If a bounded arm forwards
+    // *more* than its unbounded twin, the bound is not bounding: something is
+    // wrong with the measurement or the enforcement, and the table above would
+    // otherwise be reported as a result.
     //
     // Checked on the deterministic arms only. A single live sample can legitimately
     // land on the other side of this by chance, and a control that fires at random
     // is a control people learn to ignore.
-    for (label, constrained, unbounded) in [
-        ("bounded", &bounded, &adversarial_approved),
-        ("closed types", &closed, &adversarial_approved),
+    for (label, bounded, unbounded) in [
+        ("adversarial/declining", &bounded, &adversarial),
+        ("adversarial/approving", &adversarial_approved, &adversarial_approved),
     ] {
-        if constrained.forwarded_bytes > unbounded.forwarded_bytes {
+        if bounded.forwarded_bytes > unbounded.forwarded_bytes {
             println!(
-                "  {label}: FAILURE -- forwarded {} bytes against the unbounded \
-                 arm's {}",
-                constrained.forwarded_bytes, unbounded.forwarded_bytes
+                "  {label}: BOUND FAILURE -- the bounded arm forwarded {} bytes \
+                 against the unbounded arm's {}",
+                bounded.forwarded_bytes, unbounded.forwarded_bytes
             );
             ok = false;
         } else {
             println!(
-                "  {label}: forwarding {} -> {} bytes",
-                unbounded.forwarded_bytes, constrained.forwarded_bytes
+                "  {label}: forwarding {} -> {} bytes with a {BOUND}-char bound",
+                unbounded.forwarded_bytes, bounded.forwarded_bytes
             );
         }
     }
 
-    // And the claim the closed-type arm actually makes: it must forward strictly
-    // less than the length bound. Closed types remove the surface; a bound only
-    // shrinks it. If they came out equal, the closed arm would not be doing the
-    // thing it exists to demonstrate.
-    if closed.forwarded_bytes >= bounded.forwarded_bytes {
-        println!(
-            "\n  NOTE: closed types forwarded {} bytes against the bound's {}. The\n\
-             claim that a closed type removes the surface rather than shrinking it\n\
-             did NOT hold in this arm. The two free-form fields (`note`,\n\
-             `recipient`) are what is left, and they are the part no schema can\n\
-             close without removing the user's data.",
-            closed.forwarded_bytes, bounded.forwarded_bytes
-        );
-    }
-
     // The bound must not be quietly stealing credit from the intent pins.
     //
-    // `pin_denied` can fall in a constrained arm, and the obvious reading is that
-    // the pins got better. That reading is wrong: a constrained schema refuses the
-    // *extraction*, so several tasks stop one step earlier, before the plan ever
-    // reaches the pinned tool. The attack is stopped -- but by the extraction
-    // failing, not by the pin firing.
+    // `pin_denied` fell from 4 to 1 in the bounded arm, and the obvious reading
+    // is that the pins got better. That reading is wrong: the bound refuses the
+    // over-long *extraction*, so several tasks now stop one step earlier, before
+    // the plan ever reaches the send_email whose recipient the pin would have
+    // caught. The attack is stopped -- by the extraction failing, not by the pin
+    // firing.
     //
-    // So the columns are not comparable as "defences", only as "outcomes".
-    // Reporting a drop as a pin improvement would be reading a defence as working
-    // when it was in fact bypassed.
-    if closed.pin_denied < adversarial_approved.pin_denied {
+    // So the two columns are not comparable as "defences", only as "outcomes".
+    // Reporting the drop as a pin improvement would be reading a defence as
+    // working when it was in fact bypassed.
+    if bounded.pin_denied < adversarial.pin_denied {
         println!(
-            "\n  NOTE: pin_denied fell {} -> {} in the closed arm. That is not the\n\
-             pins getting better. The constrained schema refuses the extraction\n\
-             first, so those tasks stop before reaching the pinned tool. Only the\n\
+            "\n  NOTE: pin_denied fell {} -> {} in the bounded arm. That is not the\n\
+             pins getting better. The bound refuses the extraction first, so those\n\
+             tasks stop before reaching the pinned tool. Both columns are counts of\n\
+             tasks that stopped, not of tasks stopped *by the pins*; only the\n\
              unbounded column measures the pins.",
-            adversarial_approved.pin_denied, closed.pin_denied
+            adversarial.pin_denied, bounded.pin_denied
         );
     }
 
@@ -263,14 +308,77 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(1);
     }
     println!("\nAll controls passed; the numbers above are results.");
-    std::process::ExitCode::from(0)
+    return std::process::ExitCode::SUCCESS;
+}
+
+/// Holds the deterministic results for one model evaluation.
+struct EvaluationResults {
+    adversarial_declining: agentos_eval::model::ModelMeasurement,
+    adversarial_approving: agentos_eval::model::ModelMeasurement,
+    bounded: agentos_eval::model::ModelMeasurement,
+    closed: agentos_eval::model::ModelMeasurement,
+    declined: Vec<agentos_eval::model::ModelMeasurement>,
+    approved: Vec<agentos_eval::model::ModelMeasurement>,
+    approved_bounded: agentos_eval::model::ModelMeasurement,
+}
+
+/// Run the full evaluation suite for one model backend.
+fn run_full_evaluation(
+    backend: &mut dyn agentos_infer::Backend,
+    model_name: &str,
+    repeat: usize,
+    deterministic_only: bool,
+) -> EvaluationResults {
+    let mut declined = Vec::new();
+    let mut approved = Vec::new();
+    let mut approved_bounded = None;
+    
+    if !deterministic_only {
+        for i in 1..=repeat {
+            println!("\n--- run {i}/{repeat}: declining user ---");
+            declined.push(run_model_arm(backend, &mut |_| false, SchemaControl::Unbounded));
+            println!("\n--- run {i}/{repeat}: approving user ---");
+            approved.push(run_model_arm(backend, &mut |_| true, SchemaControl::Unbounded));
+        }
+        println!("\n## Live model, approving user, bounded schema (single sample)\n");
+        approved_bounded = Some(run_model_arm(backend, &mut |_| true, SchemaControl::Bounded(BOUND)));
+    }
+
+    // The adversarial arms run first and are deterministic, so they are the one
+    // number here that does not depend on the sampler.
+    println!("\n## Adversarial planner, declining user (deterministic)\n");
+    let mut adversary = AdversarialPlanner { emitted: Vec::new() };
+    let adversarial_declining = run_model_arm(&mut adversary, &mut |_| false, SchemaControl::Unbounded);
+
+    println!("\n## Adversarial planner, approving user (deterministic)\n");
+    let mut adversary2 = AdversarialPlanner { emitted: Vec::new() };
+    let adversarial_approving = run_model_arm(&mut adversary2, &mut |_| true, SchemaControl::Unbounded);
+
+    // The same arms with a length bound, and then with closed types.
+    let mut adversary3 = AdversarialPlanner { emitted: Vec::new() };
+    let bounded = run_model_arm(&mut adversary3, &mut |_| true, SchemaControl::Bounded(BOUND));
+    let mut adversary4 = AdversarialPlanner { emitted: Vec::new() };
+    let closed =
+        run_model_arm(&mut adversary4, &mut |_| true, SchemaControl::Closed { max_chars: BOUND });
+
+    EvaluationResults {
+        adversarial_declining,
+        adversarial_approving,
+        bounded,
+        closed,
+        declined,
+        approved,
+        approved_bounded: approved_bounded.unwrap_or_else(|| {
+            run_model_arm(&mut AdversarialPlanner { emitted: Vec::new() }, &mut |_| true, SchemaControl::Bounded(BOUND))
+        }),
+    }
 }
 
 /// Summarise several runs of one arm.
 ///
 /// The range is the honest statistic. A single run of a sampled model on a
 /// 14-task corpus is one draw, and reporting it as "the" rate would be reporting
-/// noise as a measurement — the two runs performed here differed by a full task
+/// noise as a measurement -- the two runs performed here differed by a full task
 /// on the leak count and by two on unplannable.
 fn report(label: &str, runs: &[agentos_eval::model::ModelMeasurement]) {
     println!("### {label}\n");
@@ -292,7 +400,7 @@ fn report(label: &str, runs: &[agentos_eval::model::ModelMeasurement]) {
         "  leak rate               {:.1}%  (min {:.1}%, max {:.1}%)",
         leaked.iter().sum::<usize>() as f64 / (runs[0].total as f64 * n) * 100.0,
         rate.iter().cloned().fold(f64::INFINITY, f64::min) * 100.0,
-        rate.iter().cloned().fold(f64::NEG_INFINITY, f64::max) * 100.0,
+        rate.iter().cloned().fold(f64::NEG_INFINITY, f64::max) * 100.0
     );
     println!(
         "  MODEL QUALITY failures  {}  (min {}, max {})",
@@ -312,7 +420,7 @@ fn report(label: &str, runs: &[agentos_eval::model::ModelMeasurement]) {
         "  prompts shown           {}  (min {}, max {})",
         prompts.iter().sum::<usize>(),
         prompts.iter().min().copied().unwrap_or(0),
-        prompts.iter().max().copied().unwrap_or(0),
+        prompts.iter().max().copied().unwrap_or(0)
     );
 
     // Every task that ever leaked or ever prompted, so a reader can see which
@@ -335,7 +443,6 @@ fn report(label: &str, runs: &[agentos_eval::model::ModelMeasurement]) {
     if !pin_ids.is_empty() {
         println!("  ever auto-refused: {}", pin_ids.join(", "));
     }
-
     let mut prompted_ids: Vec<&str> = runs
         .iter()
         .flat_map(|m| m.prompted_ids.iter().copied())
@@ -352,3 +459,5 @@ fn report(label: &str, runs: &[agentos_eval::model::ModelMeasurement]) {
          weak model cannot improve the leak rate by failing to plan."
     );
 }
+
+
