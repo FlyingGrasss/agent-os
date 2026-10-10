@@ -14,6 +14,7 @@
 pub mod audit;
 pub mod fswrite;
 pub mod http;
+pub mod mail;
 pub mod host;
 #[cfg(test)]
 mod tests;
@@ -32,8 +33,13 @@ pub use fswrite::{
 // collide with `fswrite::TOOL_NAME`, which is already exported there under that
 // name. Reach it as `agentos_tools::http::TOOL_NAME`, and `ARG_URL` is unique
 // enough to be lifted.
+pub use mail::{
+    MailError, MailGrant, Message, SendEmail, install_policy_rules as install_mail_policy_rules, validate_address,
+    MAX_BODY_BYTES, MAX_HEADER_CHARS, TOOL_NAME as MAIL_TOOL_NAME,
+    ARG_TO as MAIL_ARG_TO, ARG_SUBJECT as MAIL_ARG_SUBJECT, ARG_BODY as MAIL_ARG_BODY,
+};
 pub use http::{
-    address_is_routable, install_policy_rules, FetchError, FetchGrant, FetchRequest,
+    address_is_routable, install_policy_rules as install_http_policy_rules, FetchError, FetchGrant, FetchRequest,
     FetchUrl, FetchUrlArgs, Fetched, HttpFetch, LabelledFetchArgs, Limits, RawResponse, Resolver,
     SystemResolver, TcpTransport, Transport, ARG_URL, DEFAULT_MAX_BYTES, MAX_URL_LEN,
 };

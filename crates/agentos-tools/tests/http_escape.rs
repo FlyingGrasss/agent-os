@@ -34,7 +34,7 @@ use agentos_tools::http::{
     exchange, FetchError, FetchGrant, FetchRequest, FetchUrl, Limits, RawResponse, Resolver,
     TcpTransport, Transport,
 };
-use agentos_tools::{install_policy_rules, PolicyHost, Tool, ARG_URL, DEFAULT_MAX_BYTES};
+use agentos_tools::{install_http_policy_rules, PolicyHost, Tool, ARG_URL, DEFAULT_MAX_BYTES};
 use agentos_types::{SourceId, SourceKind};
 
 use agentos_tools::http::HttpFetch;
@@ -195,7 +195,7 @@ fn try_fetch(
 
 fn engine_with_http_rules() -> PolicyEngine {
     let mut rules = PolicyEngine::default_rules();
-    install_policy_rules(&mut rules);
+    install_http_policy_rules(&mut rules);
     PolicyEngine::new(rules)
 }
 
@@ -923,7 +923,7 @@ fn install_policy_rules_declares_the_url_argument() {
     // If this drifts, the tool runs under `Confirm` for every tainted URL, which
     // is safe but useless, and nobody would notice without looking.
     let mut rules = RuleSet::default();
-    install_policy_rules(&mut rules);
+    install_http_policy_rules(&mut rules);
     assert_eq!(
         rules.lookup("http.fetch", ARG_URL),
         &Rule::Allowlist,
