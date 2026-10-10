@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "agentos-core"
 version.workspace = true
 edition.workspace = true
@@ -15,6 +15,7 @@ agentos-tools = { path = "../agentos-tools" }
 # counted; wiring the recorders here is what makes I1's report observe real
 # confirmations rather than only test doubles.
 agentos-infer = { workspace = true }
+agentos-pager = { path = "../agentos-pager" }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

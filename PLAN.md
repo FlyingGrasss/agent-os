@@ -129,7 +129,8 @@ The live model arm is verified separately, against a running Ollama with
 - [x] **Trust is provenance, not structure.** The task is trusted because the user wrote it, and a user who pastes a hostile document into their own prompt is a real case. Every free-text field is escaped to one line, so a newline in the task cannot forge a `## ` header or a fake record line in the rendered prompt.
 - [x] Prompt size measured flat: a test asserts the prompt grows under 1.5x between 10 and 400 steps.
 - [ ] `fjall` LSM, group-commit fsync, crash replay — **deliberately absent, not stubbed.** Nothing here claims durability across a process restart; the ledger is an in-memory accounting record.
-- [ ] The pager is built and tested but **not yet wired into a session.** It is a library with no caller, so its claims are proven against synthetic input rather than against a running agent.
+- [x] **The pager is wired into `Session`.** `Session::with_pager` attaches one; every tool call the interpreter reports is filed into it, and `Session::prompt()` returns the assembled `Trusted<String>`. This is what makes I1 testable end to end rather than against synthetic input: a real hostile document, extracted by a real extractor, routed by a real plan through a real policy engine, and the injection text still absent from what the Controller reads.
+- [x] **A wiring bug the test caught.** The first version recorded one bare checkpoint per *statement*, so the Controller's context said *that* work happened without saying *what* — and the rolled tally, whose entire purpose is to be bounded by the tool schema rather than the task length, had no tools to count. It now reads `Machine::events`, which is the interpreter's own account rather than this loop's guess, and drains it incrementally so a run that halts and resumes does not re-record the same call.
 
 ## Phase 7 — Hardening and release
 

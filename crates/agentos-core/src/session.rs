@@ -48,7 +48,8 @@
 use agentos_dsl::{Extractor, Limits, Machine, Plan, PlanError, Step};
 use agentos_policy::ConfirmationRequest;
 use agentos_tools::PolicyHost;
-use agentos_types::UserId;
+use agentos_pager::Pager;
+use agentos_types::{ControllerAuthority, Origin, UserId};
 
 use crate::disclosure::Disclosure;
 
@@ -95,6 +96,20 @@ pub struct Session<'a> {
     /// measurement can distinguish "a person was asked once" from "a person was
     /// asked nine times and said yes each time".
     asked: usize,
+    /// What the Controller would see, assembled by the pager.
+    ///
+    /// Optional because a caller that only wants the outcome should not be forced
+    /// to pay for prompt assembly. When present, every step the session accepts
+    /// is recorded and the prompt is the **only** way to read it back — so the
+    /// I1 guarantee is carried by a type rather than by a convention somebody has
+    /// to remember.
+    pager: Option<Pager>,
+    /// Names of tools the plan has used, for the pager's records.
+    ///
+    /// The pager records that a tool ran and how it ended, never what it was
+    /// given. Tool arguments are where tainted values live, so they are
+    /// structurally absent from what reaches the Controller's context.
+    tools: Vec<agentos_pager::ToolName>,
 }
 
 impl<'a> Session<'a> {
@@ -105,7 +120,111 @@ impl<'a> Session<'a> {
             limits: Limits::default(),
             confirmation_limit: DEFAULT_CONFIRMATION_LIMIT,
             asked: 0,
+            pager: None,
+            tools: Vec::new(),
         }
+    }
+
+    /// Give this session a pager, so its steps are recorded into the Controller's
+    /// context.
+    ///
+    /// The task is `Trusted` because the user wrote it. It is not the only route
+    /// into the prompt — every recorded step and every fact is also trusted — but
+    /// it is the one the caller has to get right first, so it is the parameter and
+    /// it is a `Trusted` rather than a `String`.
+    pub fn with_pager(
+        mut self,
+        task: &agentos_types::Trusted<String>,
+        config: agentos_pager::PagerConfig,
+    ) -> Result<Self, PlanError> {
+        self.pager = Some(Pager::new(task.clone(), config).map_err(|e| {
+            PlanError::ToolRejected {
+                tool: "pager".into(),
+                reason: e.to_string(),
+            }
+        })?);
+        Ok(self)
+    }
+
+    /// The assembled prompt, if a pager was attached.
+    ///
+    /// Returns a `Trusted<String>` and nothing else. There is no accessor that
+    /// hands back the text without its label, which is the point: a caller cannot
+    /// read the Controller's context without holding the provenance that says
+    /// where it came from.
+    pub fn prompt(&self) -> Result<Option<agentos_pager::Prompt>, PlanError> {
+        match &self.pager {
+            Some(p) => p.assemble().map(Some).map_err(|e| PlanError::ToolRejected {
+                tool: "pager".into(),
+                reason: e.to_string(),
+            }),
+            None => Ok(None),
+        }
+    }
+
+    /// Record the tool calls the machine reported.
+    ///
+    /// Reads `Machine::events` rather than being told what ran, so the record is
+    /// derived from the interpreter's own account rather than this loop's guess.
+    ///
+    /// An earlier version recorded one bare checkpoint per statement, and that was
+    /// wrong in a way only the test caught: the Controller's context said *that*
+    /// work happened without saying *what*, and the rolled tally -- whose entire
+    /// purpose is to be bounded by the tool schema rather than the task length --
+    /// had no tools to count.
+    ///
+    /// A pager failure is deliberately not fatal. Losing context is bad; stopping a
+    /// task because a summary could not be filed would be worse.
+    fn record_events(&mut self, events: &[agentos_types::Event]) {
+        if self.pager.is_none() {
+            return;
+        }
+        for event in events {
+            let agentos_types::Event::ToolCompleted { tool, ok, .. } = event else {
+                continue;
+            };
+            self.record(
+                &tool.clone(),
+                if *ok {
+                    agentos_pager::StepOutcome::Succeeded
+                } else {
+                    agentos_pager::StepOutcome::Failed
+                },
+            );
+        }
+    }
+
+    /// Record one tool call into the pager.
+    ///
+    /// The name is interned, so the rolled tally holds one entry per *distinct
+    /// tool* rather than one per call. That is what keeps the prompt bounded when a
+    /// task runs the same tool a thousand times.
+    fn record(&mut self, tool: &str, outcome: agentos_pager::StepOutcome) {
+        let Some(pager) = self.pager.as_mut() else {
+            return;
+        };
+        let handle = match self.tools.iter().find(|t| t.text() == tool) {
+            Some(existing) => existing.clone(),
+            None => {
+                let handle = agentos_pager::ToolName::new(
+                    agentos_types::Trusted::inherited(
+                        Origin::Controller(ControllerAuthority::issue()),
+                        tool.to_string(),
+                    ),
+                );
+                self.tools.push(handle.clone());
+                handle
+            }
+        };
+        // `Val::trusted` is correct rather than convenient: a `StepRecord` is
+        // structurally incapable of carrying untrusted text -- tool arguments are
+        // deliberately not recorded, because that is where tainted values live --
+        // so there is nothing here for a label to protect. The `Val` wrapper is
+        // still what `ingest` takes, so a future record type that *could* carry
+        // text would be caught at this boundary rather than trusted.
+        let _ = pager.ingest(&agentos_types::Val::trusted(
+            agentos_pager::StepRecord::tool(handle, outcome),
+        ));
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -144,10 +263,23 @@ impl<'a> Session<'a> {
         F: FnMut(&ConfirmationRequest) -> bool,
     {
         let mut machine = Machine::start_with(plan, self.limits)?;
+        // How much of `Machine::events` has already been filed, so each event is
+        // recorded exactly once across a run that halts and resumes.
+        let mut recorded = 0usize;
 
         loop {
             match machine.advance(self.host, extractor) {
-                Ok(Step::Advanced) => continue,
+                Ok(Step::Advanced) => {
+                    // Drained, not accumulated: `Machine::events` is cumulative,
+                    // so re-reading it every turn would re-record the whole
+                    // history on every step and the tally would count the same
+                    // call twice.
+                    let fresh: Vec<agentos_types::Event> =
+                        machine.events()[recorded..].to_vec();
+                    recorded = machine.events().len();
+                    self.record_events(&fresh);
+                    continue;
+                }
                 Ok(Step::Done) => {
                     return Ok(Outcome::Completed {
                         reports: machine
