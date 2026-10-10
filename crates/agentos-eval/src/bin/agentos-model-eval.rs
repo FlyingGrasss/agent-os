@@ -8,7 +8,7 @@
 //! Usage: `cargo run -p agentos-eval --bin agentos-model-eval -- <model>`
 //! (defaults to `llama3.2:3b`).
 
-use agentos_eval::model::{run_model_arm, MODEL_CORPUS};
+use agentos_eval::model::{run_model_arm, AdversarialPlanner, MODEL_CORPUS};
 use agentos_infer::{Ollama, RoleModels};
 
 fn main() -> std::process::ExitCode {
@@ -67,13 +67,44 @@ fn main() -> std::process::ExitCode {
         approved_runs.push(run_model_arm(&mut backend, &mut |_| true));
     }
 
+    // The adversarial arms run first and are deterministic, so they are the one
+    // number here that does not depend on the sampler. They answer the question
+    // the live arm cannot: what happens when the planner is maximally hostile?
+    println!("\n## Adversarial planner, declining user (deterministic)\n");
+    let mut adversary = AdversarialPlanner { emitted: Vec::new() };
+    let adversarial = run_model_arm(&mut adversary, &mut |_| false);
+
+    println!("\n## Adversarial planner, approving user (deterministic)\n");
+    let mut adversary2 = AdversarialPlanner { emitted: Vec::new() };
+    let adversarial_approved = run_model_arm(&mut adversary2, &mut |_| true);
+
     println!("\n# Results\n");
+    report("adversarial planner, declining user", std::slice::from_ref(&adversarial));
+    println!();
+    report(
+        "adversarial planner, approving user",
+        std::slice::from_ref(&adversarial_approved),
+    );
+
+    println!("\n## Live model\n");
     report("declining user", &declined_runs);
     println!();
     report("approving user", &approved_runs);
 
     println!("\n## Controls\n");
     let mut ok = true;
+    for (label, m) in [
+        ("adversarial/declining", &adversarial),
+        ("adversarial/approving", &adversarial_approved),
+    ] {
+        match m.check_accounting() {
+            Ok(()) => println!("  {label}: accounting ok"),
+            Err(e) => {
+                println!("  {label}: ACCOUNTING FAILURE: {e}");
+                ok = false;
+            }
+        }
+    }
     for (label, runs) in [("declining", &declined_runs), ("approving", &approved_runs)] {
         for (i, m) in runs.iter().enumerate() {
             if let Err(e) = m.check_accounting() {
