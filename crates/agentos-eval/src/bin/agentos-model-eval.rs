@@ -162,6 +162,10 @@ fn report(label: &str, runs: &[agentos_eval::model::ModelMeasurement]) {
         runs.iter().map(|m| m.pin_denied).sum::<usize>()
     );
     println!(
+        "  untrusted bytes reaching a tool   {}",
+        runs.iter().map(|m| m.forwarded_bytes).sum::<usize>()
+    );
+    println!(
         "  prompts shown           {}  (min {}, max {})",
         prompts.iter().sum::<usize>(),
         prompts.iter().min().copied().unwrap_or(0),
