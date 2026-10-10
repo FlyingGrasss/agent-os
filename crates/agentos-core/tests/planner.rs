@@ -14,9 +14,64 @@
 
 use std::cell::RefCell;
 
+use agentos_core::planner::{advertised_tool_names, REAL_TOOL_NAMES};
 use agentos_core::{PlanOutcome, Planner};
 use agentos_infer::{Backend, Completion, Conversation, InferError, Output, Role, Usage};
 use agentos_types::{ControllerAuthority, Origin, Trusted, UserId};
+
+// ---------------------------------------------------------------------------
+// The instruction must not lie about what tools exist
+// ---------------------------------------------------------------------------
+
+/// Every tool the planner is told about actually exists.
+///
+/// Found by a test, not by reading. The instruction advertised `http.get`,
+/// `send_email`, and `calendar.create`; the real tools are `http.fetch` and
+/// `fs.write`, and `send_email` exists nowhere but in test fixtures. A model
+/// faithfully following the instruction would produce plans naming tools the host
+/// refuses at runtime.
+///
+/// It survived so long because every evaluation harness registered *probes* named
+/// after the instruction rather than the real tools -- so the harness and the
+/// instruction agreed with each other and neither agreed with reality. A fiction
+/// that is internally consistent measures perfectly well.
+///
+/// Asserted as a set comparison rather than a substring check, because the failure
+/// mode is a name that is wrong, not a name that is missing.
+#[test]
+fn the_instruction_advertises_only_real_tools() {
+    let advertised: Vec<&str> = advertised_tool_names();
+    for name in &advertised {
+        assert!(
+            REAL_TOOL_NAMES.contains(name),
+            "the planner instruction advertises `{name}`, which no tool registers \
+             under. Real tools: {REAL_TOOL_NAMES:?}"
+        );
+    }
+    for name in REAL_TOOL_NAMES {
+        assert!(
+            advertised.contains(name),
+            "the tool `{name}` exists but the planner was never told about it, so \
+             no model will ever plan a call to it"
+        );
+    }
+}
+
+/// The parser finds every name it is supposed to.
+///
+/// A parser that silently returns an empty list would make the test above pass
+/// vacuously -- advertising nothing is trivially consistent with reality. Asserted
+/// separately so that failure mode cannot hide.
+#[test]
+fn the_tool_name_parser_finds_the_names() {
+    let parsed = advertised_tool_names();
+    assert_eq!(
+        parsed.len(),
+        REAL_TOOL_NAMES.len(),
+        "the parser found {parsed:?} but {REAL_TOOL_NAMES:?} are expected; an \
+         empty or short parse would make the drift test above vacuous"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // A backend that replays a fixed response

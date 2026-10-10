@@ -49,6 +49,31 @@ use agentos_types::{ControllerAuthority, Origin, UserId};
 /// cannot splice a document into it. There is no parameter through which
 /// untrusted bytes could arrive, which is I1 enforced by the shape of the API
 /// rather than by a check somebody has to remember to write.
+/// The tools this planner is allowed to name.
+///
+/// Corrected after a test found the instruction lying. It advertised
+/// `http.get`, `send_email`, and `calendar.create`; the tools that actually exist
+/// are `http.fetch` and `fs.write`, and `send_email` exists nowhere but inside
+/// test fixtures.
+///
+/// It went unnoticed because every evaluation harness registered *probes* named
+/// after the instruction rather than the real tools. The measurement was of a
+/// fiction, and it passed, because a fiction that is internally consistent
+/// measures fine. The drift test below is what closes it.
+///
+/// Note what this costs: the eval corpus still uses `http.get` and `send_email`,
+/// because those probes are what the policy measurements are built on. Rewriting
+/// the corpus is a separate piece of work and is not done; until it is, the
+/// *policy* numbers remain valid (they never depended on the tools existing) and
+/// the *end-to-end* numbers should be read as measuring the harness rather than
+/// the shipping configuration.
+/// The shipping tool names, for the drift test to compare against.
+///
+/// A constant beside the instruction rather than inside it. It exists so a test
+/// can assert the two agree, and it is the *only* place the names appear twice --
+/// which is the minimum duplication that still catches the mistake.
+pub const REAL_TOOL_NAMES: &[&str] = &["http.fetch", "fs.write"];
+
 const PLANNER_INSTRUCTION: &str = "\
 You write plans for an agent that can use tools. Answer with JSON only.
 
@@ -62,17 +87,14 @@ Grammar:
 
 Strings MUST be in double quotes. Tool calls MUST be bound with let.
 
-Tools: http.get(url = \"...\"), send_email(to = \"...\", subject = \"...\"),
-fs.write(path = \"...\", contents = \"...\"), calendar.create(title = \"...\").
+Tools: http.fetch(url = \"...\"), fs.write(path = \"...\", contents = \"...\").
 
-WORKED EXAMPLE. Task: \"Fetch https://x.test/i and email the note field to
-bob@example.test, subject 'invoice'.\"
+WORKED EXAMPLE. Task: \"Fetch https://x.test/i and report how long it is.\"
 Answer:
 {\"program\": [
-  {\"op\": \"let\", \"name\": \"page\", \"value\": \"http.get(url = \\\"https://x.test/i\\\")\"},
-  {\"op\": \"let\", \"name\": \"inv\", \"value\": \"extract(Invoice, source = page)\"},
-  {\"op\": \"let\", \"name\": \"sent\", \"value\": \"send_email(to = inv.note, subject = \\\"invoice\\\")\"},
-  {\"op\": \"report\", \"value\": \"len(inv)\"}
+  {\"op\": \"let\", \"name\": \"page\", \"value\": \"http.fetch(url = \\\"https://x.test/i\\\")\"},
+  {\"op\": \"let\", \"name\": \"doc\", \"value\": \"extract(Document, source = page)\"},
+  {\"op\": \"report\", \"value\": \"len(doc)\"}
 ]}
 
 Another example. Task: \"Report the word hello.\"
@@ -81,6 +103,38 @@ Answer:
               {\"op\": \"report\", \"value\": \"w\"}]}
 
 One line per expression. No commentary. No markdown fences.";
+
+/// Every tool name this instruction advertises.
+///
+/// Returned as data so a test can compare it against what tools actually register
+/// under. Parsed out of the instruction rather than maintained beside it, because
+/// a hand-maintained list is exactly the thing that drifted in the first place.
+pub fn advertised_tool_names() -> Vec<&'static str> {
+    let line = PLANNER_INSTRUCTION
+        .lines()
+        .find_map(|l| l.strip_prefix("Tools: "))
+        .unwrap_or_default();
+    let mut names = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('(') {
+        // Everything between the last `)` and this `(` is `", name"`, so the
+        // separator has to come off. Trimming alone is not enough -- `", fs.write"`
+        // trimmed is still not a name.
+        let name = rest[..open]
+            .rsplit(',')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if !name.is_empty() {
+            names.push(name);
+        }
+        match rest[open..].find(')') {
+            Some(close) => rest = &rest[open + close + 1..],
+            None => break,
+        }
+    }
+    names
+}
 
 /// Why a model response could not become a plan.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

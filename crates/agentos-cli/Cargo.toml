@@ -1,11 +1,30 @@
-﻿[package]
+[package]
 name = "agentos-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# The library holds the consent logic -- the one place where this system's
+# security rests on a person -- and the binary holds only wiring. Splitting them
+# is what makes the consent rules testable without a terminal.
+[lib]
+name = "agentos_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agentos"
+path = "src/main.rs"
+
 [dependencies]
 agentos-types = { workspace = true }
+agentos-policy = { workspace = true }
+agentos-core = { workspace = true }
+agentos-dsl = { workspace = true }
+agentos-pager = { path = "../agentos-pager" }
+agentos-tools = { workspace = true }
+agentos-infer = { workspace = true, features = ["ollama"] }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
