@@ -123,11 +123,13 @@ The live model arm is verified separately, against a running Ollama with
 
 ## Phase 6 — Hierarchical context pager
 
-- [ ] L1 / L2 / L3 tiers
-- [ ] Deterministic prompt assembly from the task graph
-- [ ] `fjall` LSM, group-commit fsync
-- [ ] Crash replay
-- [ ] Prompt tokens per step measured flat as task length grows
+- [x] L1 / L2 / L3 tiers, plus a rolled tally that holds counts rather than text — which is *why* prompt size is bounded by the tool schema rather than the task length
+- [x] Deterministic prompt assembly. Byte-identical for identical input; a test scans the crate's source for `HashMap`, `SystemTime`, `Instant::now` and `rand`, because a reproducibility bug is invisible — the code compiles, the prompt is subtly unstable, and nothing reports it
+- [x] **I1 is enforced here, structurally.** Every renderable string is a `Trusted<String>`; `Prompt` has no public constructor taking text, and no `Deref<str>` that drops the label. A `StepRecord` cannot carry document text at all — tool *arguments* are deliberately not recorded, because that is where tainted values live.
+- [x] **Trust is provenance, not structure.** The task is trusted because the user wrote it, and a user who pastes a hostile document into their own prompt is a real case. Every free-text field is escaped to one line, so a newline in the task cannot forge a `## ` header or a fake record line in the rendered prompt.
+- [x] Prompt size measured flat: a test asserts the prompt grows under 1.5x between 10 and 400 steps.
+- [ ] `fjall` LSM, group-commit fsync, crash replay — **deliberately absent, not stubbed.** Nothing here claims durability across a process restart; the ledger is an in-memory accounting record.
+- [ ] The pager is built and tested but **not yet wired into a session.** It is a library with no caller, so its claims are proven against synthetic input rather than against a running agent.
 
 ## Phase 7 — Hardening and release
 

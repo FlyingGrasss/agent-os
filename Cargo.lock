@@ -80,6 +80,7 @@ dependencies = [
  "agentos-types",
  "serde",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

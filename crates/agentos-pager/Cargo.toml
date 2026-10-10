@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "agentos-pager"
 version.workspace = true
 edition.workspace = true
@@ -9,3 +9,7 @@ license.workspace = true
 agentos-types = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# Tests build a UserId the same way the eval rig does.
+uuid = { workspace = true }
