@@ -102,11 +102,11 @@ impl agentos_dsl::Extractor for ModelExtractor<'_> {
             }
         })?;
 
-        // No label is set here, and that is deliberate. The interpreter applies
-        // the document's own label to whatever this returns, so an extraction
-        // inherits the taint of the document it was lifted out of. Setting one
-        // here would either duplicate that or, worse, provide a place where a
-        // trusted label could be attached to attacker-controlled structure.
+        // No label is set on the way out, and that is deliberate. The interpreter
+        // applies the document's own label to whatever this returns, so an
+        // extraction inherits the taint of the document it was lifted out of.
+        // Setting one here would either duplicate that or, worse, provide a place
+        // where a trusted label could be attached to attacker-controlled structure.
         //
         // Read through the deliberately awkward accessor, because that is the only
         // way to see inside a `Val` whose label has not been vouched for. It also
@@ -114,7 +114,7 @@ impl agentos_dsl::Extractor for ModelExtractor<'_> {
         // believed: an extractor that reports a *trusted* result for an untrusted
         // document is broken, and the right response to a broken trust boundary is
         // to refuse the run, not to launder the label through.
-        extraction.data.with_label_for_display(|json, label| {
+        let data = extraction.data.with_label_for_display(|json, label| {
             if label.is_trusted() {
                 return Err(PlanError::ToolRejected {
                     tool: "extract".into(),
@@ -123,7 +123,115 @@ impl agentos_dsl::Extractor for ModelExtractor<'_> {
                 });
             }
             Ok(from_json(json))
-        })
+        })?;
+
+        let bound = bounds_from_schema(spec);
+        enforce_bound(&data, bound.as_ref())?;
+        Ok(data)
+    }
+}
+
+/// The character ceiling a schema declares for its string fields.
+///
+/// Schema-wide rather than per-field, and the field name says so: `maxLength` is
+/// read once across the properties and enforced against every string. That is
+/// stricter than giving each field its own ceiling, which is the safe direction to
+/// be wrong in -- but it does mean a schema cannot yet say "note is 200, memo is
+/// 4000". Adding that would be a feature, and it would also be a way to widen the
+/// forwarding surface, so it should be a deliberate decision rather than a
+/// convenience.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldBounds {
+    /// Longest string any field may carry.
+    pub max_chars: usize,
+}
+
+/// Read the ceiling a schema declares, if it declares one.
+///
+/// A schema with no declared bound gets no bound. That default is load-bearing:
+/// if a missing `maxLength` silently became *some* limit, every existing schema
+/// would look protected and none would be. The absence of a limit is not a limit.
+fn bounds_from_schema(spec: &serde_json::Value) -> Option<FieldBounds> {
+    let props = spec.get("properties")?.as_object()?;
+    let declared = props
+        .values()
+        .filter_map(|p| p.get("maxLength").and_then(serde_json::Value::as_u64))
+        .max()?
+        .max(1) as usize;
+    Some(FieldBounds {
+        max_chars: declared,
+    })
+}
+
+/// Refuse any string longer than the schema allows.
+///
+/// Refused rather than truncated. Truncating would let attacker text survive in a
+/// form nobody reviewed, and would report a value the extractor never produced --
+/// a defence that silently loses data while appearing to hold. A document that
+/// does not fit the shape the Controller asked for is a document to stop on.
+fn enforce_bound(data: &PlanData, bounds: Option<&FieldBounds>) -> Result<(), PlanError> {
+    let Some(bounds) = bounds else {
+        return Ok(());
+    };
+    let mut worst: Option<(usize, String)> = None;
+    walk_strings(data, &mut String::new(), &mut worst);
+    let Some((len, path)) = worst else {
+        return Ok(());
+    };
+    if len > bounds.max_chars {
+        return Err(PlanError::ToolRejected {
+            tool: "extract".into(),
+            reason: format!(
+                "field `{path}` is {len} characters, over the {} this schema \
+                 declares; the document does not match the shape the Controller \
+                 asked for",
+                bounds.max_chars
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Find the longest string in the structure, and where it was.
+///
+/// Walks records and lists rather than stopping at the top level, because nesting
+/// is exactly where a payload would be put by anyone who had read this function.
+/// A bound that only inspected top-level fields would look like a defence while
+/// measuring nothing.
+fn walk_strings(data: &PlanData, path: &mut String, worst: &mut Option<(usize, String)>) {
+    let mut note = |len: usize, at: &str| {
+        let better = worst.as_ref().is_none_or(|(best, _)| len > *best);
+        if better {
+            *worst = Some((len, at.to_string()));
+        }
+    };
+
+    match data {
+        PlanData::Quoted { text, .. } | PlanData::Str(text) => {
+            note(text.chars().count(), path);
+        }
+        PlanData::Record(fields) => {
+            let base = path.clone();
+            for (name, value) in fields {
+                let here = if base.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{base}.{name}")
+                };
+                *path = here;
+                walk_strings(value, path, worst);
+            }
+            *path = base;
+        }
+        PlanData::List(items) => {
+            let base = path.clone();
+            for (i, value) in items.iter().enumerate() {
+                *path = format!("{base}[{i}]");
+                walk_strings(value, path, worst);
+            }
+            *path = base;
+        }
+        _ => {}
     }
 }
 

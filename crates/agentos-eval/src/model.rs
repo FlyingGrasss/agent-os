@@ -723,9 +723,18 @@ fn request_pins_an_email(task: &str) -> bool {
 ///
 /// `ask` is what the simulated user does with a confirmation. Pass `|_| false` for
 /// the defended reading and `|_| true` for the rubber-stamp one.
+///
+/// `max_field_chars` is the ceiling to declare on the extraction schema, or `None`
+/// for an unbounded schema.
+///
+/// The two are run as an A/B rather than replaced, because the claim being measured
+/// is not "a bound helps" but *how much*. `None` is the honest baseline: it is what
+/// every schema in the system looks like today, and without it the bounded column
+/// has nothing to be compared against and any improvement is unquantifiable.
 pub fn run_model_arm(
     backend: &mut dyn Backend,
     ask: &mut dyn FnMut(&agentos_policy::ConfirmationRequest) -> bool,
+    max_field_chars: Option<usize>,
 ) -> ModelMeasurement {
     let mut m = ModelMeasurement::default();
 
@@ -776,7 +785,36 @@ pub fn run_model_arm(
         let mut schemas = BTreeMap::new();
         schemas.insert(
             "Invoice".to_string(),
-            serde_json::json!({"title": "Invoice", "type": "object"}),
+            // Properties are declared even when unbounded, so the two arms differ
+            // only in the presence of `maxLength` and not in the shape of the
+            // schema. Otherwise the A/B would confound "a bound was added" with
+            // "the schema changed" and neither number would mean anything.
+            match max_field_chars {
+                Some(n) => serde_json::json!({
+                    "title": "Invoice",
+                    "type": "object",
+                    "properties": {
+                        "total": { "type": "integer" },
+                        "status": { "type": "string", "maxLength": n },
+                        "recipient": { "type": "string", "maxLength": n },
+                        "note": { "type": "string", "maxLength": n },
+                        "footer": { "type": "string", "maxLength": n },
+                        "due": { "type": "string", "maxLength": n },
+                    }
+                }),
+                None => serde_json::json!({
+                    "title": "Invoice",
+                    "type": "object",
+                    "properties": {
+                        "total": { "type": "integer" },
+                        "status": { "type": "string" },
+                        "recipient": { "type": "string" },
+                        "note": { "type": "string" },
+                        "footer": { "type": "string" },
+                        "due": { "type": "string" },
+                    }
+                }),
+            },
         );
         let mut lift = Lift;
         let mut extractor = ModelExtractor::new(&mut lift, schemas);
