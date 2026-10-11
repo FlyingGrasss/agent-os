@@ -36,7 +36,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use agentos_cli::{ask_on_stdin, Decision};
+use agentos_cli::{ask_on_stdin, Decision, client::{dispatch, check, ExecuteParams, Grants}, util::user_id};
 use agentos_core::{ModelExtractor, Outcome, Planner, PlanOutcome, Session};
 use agentos_dsl::PlanError;
 use agentos_infer::{Ollama, RoleModels};
@@ -106,81 +106,14 @@ fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
 /// implemented" call for completely different responses, and a tool that blurs
 /// them sends people to fix the wrong thing.
 fn cmd_check() -> Result<std::process::ExitCode, String> {
-    println!("AgentOS environment\n");
-
-    println!("user");
-    println!("  interactive stdin:   {}", yes_no(agentos_cli::stdin_is_interactive()));
-    if !agentos_cli::stdin_is_interactive() {
-        println!(
-            "    -> confirmations will be REFUSED. There is no person to ask, so\n\
-             there is no approval. This is deliberate: a scripted run must\n\
-             not be able to log approvals nobody gave."
-        );
+    // Try the daemon first
+    if let Ok(code) = check() {
+        return Ok(code);
     }
 
-    println!("\nmodel");
-    let model = std::env::var("AGENTOS_MODEL").unwrap_or_else(|_| "llama3.2:3b".into());
-    let backend = Ollama::new(RoleModels::Shared {
-        model: model.clone(),
-    });
-    match backend.probe() {
-        Ok(models) => {
-            if models.iter().any(|m| m.starts_with(&model)) {
-                println!("  {model}: available");
-            } else {
-                println!("  {model}: NOT PULLED");
-                println!("    available: {models:?}");
-                println!("    -> the planner will not run. `ollama pull {model}`.");
-            }
-        }
-        Err(e) => {
-            println!("  server: unreachable ({e})");
-            println!("    -> the planner will not run. Start one with `ollama serve`.");
-        }
-    }
-
-    println!("\nsandbox");
-    // Stated as a limitation rather than probed. This build does not link the
-    // Landlock/seccomp layer, and claiming otherwise would be the most expensive
-    // kind of wrong: a user believing tools are confined when they are not.
-    println!("  landlock/seccomp confinement: NOT BUILT IN THIS BUILD");
-    println!(
-        "    -> tools run with the authority of this process. The policy engine\n\
-         still enforces taint rules; it does not confine the process."
-    );
-    println!("\nnetwork");
-    println!("  TLS transport:        NOT BUILT IN THIS BUILD");
-    println!(
-        "    -> http.fetch refuses every https URL. This is deliberate: the crate\n\
-         has no TLS dependency and downgrading to plaintext would make the\n\
-         insecure path the easy one. `fetch` will therefore always fail here."
-    );
-    #[cfg(target_os = "linux")]
-    {
-        println!("\nlinux kernel");
-        println!("  cgroup v2 mounted:   {}", yes_no(std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()));
-        println!(
-            "  effective caps:      {}",
-            std::fs::read_to_string("/proc/self/status")
-                .ok()
-                .and_then(|s| {
-                    s.lines()
-                        .find(|l| l.starts_with("CapEff:"))
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| "unknown".into())
-        );
-        println!(
-            "  unprivileged bpf:    {}",
-            std::fs::read_to_string("/proc/sys/kernel/unprivileged_bpf_disabled")
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| "unknown".into())
-        );
-        println!("    -> 0 disabled, 1 restricted, 2 fully off.");
-    }
-
-    println!("\n  (run `agentos run --help` for the command form)");
-    Ok(std::process::ExitCode::SUCCESS)
+    // Fall back to local check
+    eprintln!("agentos: daemon not reachable, falling back to local check");
+    cmd_check_local()
 }
 
 fn yes_no(b: bool) -> &'static str {
@@ -233,6 +166,41 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
 }
 
 fn cmd_run(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let options = parse_options(args)?;
+    let task = options
+        .task
+        .ok_or_else(|| "no task given".to_string())?;
+
+    // Build grants from options for the daemon
+    let grants = ExecuteParams {
+        task: task.clone(),
+        grants: Grants {
+            hosts: options.allow_hosts.clone(),
+            write_roots: options.write_root.as_ref().map(|p| p.to_string_lossy().to_string()).into_iter().collect(),
+            send_email: false, // not implemented in CLI yet
+        },
+        timeout_secs: 300,
+    };
+
+    // Try to dispatch to the daemon first
+    match dispatch(task.clone(), grants) {
+        Ok(code) => return Ok(code),
+        Err(e) => eprintln!("agentos: daemon error: {}", e),
+    }
+
+    // Fall back to local execution if daemon is not reachable
+    eprintln!("agentos: daemon not reachable, falling back to local execution");
+    cmd_run_local(args)
+}
+
+/// One user, fixed.
+///
+/// The CLI runs as one person on one machine. Deriving a real identity from the
+/// OS would be the right thing for a multi-user daemon and is out of scope here;
+/// what matters is that it is *deterministic within a run*, so the audit trail's
+/// origin column means something.
+/// Local execution fallback (the original cmd_run).
+fn cmd_run_local(args: &[String]) -> Result<std::process::ExitCode, String> {
     let options = parse_options(args)?;
     let task = options
         .task
@@ -375,16 +343,83 @@ fn cmd_run(args: &[String]) -> Result<std::process::ExitCode, String> {
     }
 }
 
-/// One user, fixed.
-///
-/// The CLI runs as one person on one machine. Deriving a real identity from the
-/// OS would be the right thing for a multi-user daemon and is out of scope here;
-/// what matters is that it is *deterministic within a run*, so the audit trail's
-/// origin column means something.
-fn user_id() -> UserId {
-    let mut b = [0u8; 16];
-    b[15] = 0x01;
-    UserId(uuid::Uuid::from_bytes(b))
+/// Local check fallback (the original cmd_check).
+fn cmd_check_local() -> Result<std::process::ExitCode, String> {
+    println!("AgentOS environment\n");
+
+    println!("user");
+    println!("  interactive stdin:   {}", yes_no(agentos_cli::stdin_is_interactive()));
+    if !agentos_cli::stdin_is_interactive() {
+        println!(
+            "    -> confirmations will be REFUSED. There is no person to ask, so\n\
+             there is no approval. This is deliberate: a scripted run must\n\
+             not be able to log approvals nobody gave."
+        );
+    }
+
+    println!("\nmodel");
+    let model = std::env::var("AGENTOS_MODEL").unwrap_or_else(|_| "llama3.2:3b".into());
+    let backend = Ollama::new(RoleModels::Shared {
+        model: model.clone(),
+    });
+    match backend.probe() {
+        Ok(models) => {
+            if models.iter().any(|m| m.starts_with(&model)) {
+                println!("  {model}: available");
+            } else {
+                println!("  {model}: NOT PULLED");
+                println!("    available: {models:?}");
+                println!("    -> the planner will not run. `ollama pull {model}`.");
+            }
+        }
+        Err(e) => {
+            println!("  server: unreachable ({e})");
+            println!("    -> the planner will not run. Start one with `ollama serve`.");
+        }
+    }
+
+    println!("\nsandbox");
+    // Stated as a limitation rather than probed. This build does not link the
+    // Landlock/seccomp layer, and claiming otherwise would be the most expensive
+    // kind of wrong: a user believing tools are confined when they are not.
+    println!("  landlock/seccomp confinement: NOT BUILT IN THIS BUILD");
+    println!(
+        "    -> tools run with the authority of this process. The policy engine\n\
+         still enforces taint rules; it does not confine the process."
+    );
+    println!("\nnetwork");
+    println!("  TLS transport:        NOT BUILT IN THIS BUILD");
+    println!(
+        "    -> http.fetch refuses every https URL. This is deliberate: the crate\n\
+         has no TLS dependency and downgrading to plaintext would make the\n\
+         insecure path the easy one. `fetch` will therefore always fail here."
+    );
+    #[cfg(target_os = "linux")]
+    {
+        println!("\nlinux kernel");
+        println!("  cgroup v2 mounted:   {}", yes_no(std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()));
+        println!(
+            "  effective caps:      {}",
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("CapEff:"))
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "unknown".into())
+        );
+        println!(
+            "  unprivileged bpf:    {}",
+            std::fs::read_to_string("/proc/sys/kernel/unprivileged_bpf_disabled")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "unknown".into())
+        );
+        println!("    -> 0 disabled, 1 restricted, 2 fully off.");
+    }
+
+    println!("\n  (run `agentos run --help` for the command form)");
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 /// Role Q, stubbed to lift the document verbatim.

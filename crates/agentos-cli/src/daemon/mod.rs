@@ -361,15 +361,18 @@ async fn wait_for_signal() {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = match signal(SignalKind::terminate()) {
             Ok(s) => s,
-            Err(_) => {
+            Err(e) => {
+                eprintln!("agentosd: failed to create SIGTERM handler: {}", e);
                 let _ = tokio::signal::ctrl_c().await;
                 return;
             }
         };
+        eprintln!("agentosd: waiting for signals...");
         tokio::select! {
-            _ = term.recv() => {}
-            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => { eprintln!("agentosd: received SIGTERM"); }
+            _ = tokio::signal::ctrl_c() => { eprintln!("agentosd: received Ctrl-C"); }
         }
+        eprintln!("agentosd: wait_for_signal returned");
     }
     #[cfg(not(unix))]
     {

@@ -169,4 +169,10 @@ pub fn ask_with(request: &ConfirmationRequest, answer: &str, interactive: bool) 
 /// process. The binary is a three-line shim over [`daemon::main`].
 pub mod daemon;
 
+/// Client for connecting to the daemon.
+pub mod client;
+
+/// Shared utilities for the CLI.
+pub mod util;
+
 
