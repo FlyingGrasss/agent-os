@@ -35,6 +35,7 @@ use bytes::Buf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use super::auth::{self, AuthParams, Token, AUTH_METHOD};
 use super::executor;
 use super::protocol::{ErrorBody, ExecuteParams, Request, Response, MAX_FRAME_BYTES};
 use super::state::DaemonState;
@@ -99,6 +100,120 @@ async fn read_exact<S: AsyncRead + Unpin>(stream: &mut S, n: usize) -> io::Resul
     Ok(Bytes::from(buf))
 }
 
+/// Read one length-prefixed frame.
+///
+/// `Ok(None)` means the peer closed cleanly between frames, which is how a client
+/// says goodbye and is not an error. A length beyond [`MAX_FRAME_BYTES`] is
+/// refused before anything is allocated for it, and the caller closes: there is no
+/// way to resynchronise a length-prefixed stream after a bad length without
+/// guessing where the next frame begins, and guessing on a stream that carries
+/// authority requests is not a risk worth taking.
+async fn read_frame<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Option<Bytes>, io::Error> {
+    let prefix = match read_exact(stream, PREFIX).await {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    };
+
+    let len = u32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("frame of {len} bytes exceeds the {MAX_FRAME_BYTES}-byte limit"),
+        ));
+    }
+
+    match read_exact(stream, len).await {
+        Ok(body) => Ok(Some(body)),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Require a valid `auth` frame before anything else.
+///
+/// # Why this is a gate and not a method
+///
+/// If `auth` were dispatched alongside `ping` and `execute`, then the order of
+/// frames would decide whether a request was honoured, and the connection state
+/// that enforces it would live inside the same `match` as the routing. That is a
+/// mistake waiting to happen: adding a branch to the dispatcher would silently
+/// make unauthenticated dispatch reachable.
+///
+/// So authentication happens before the dispatch loop exists. Nothing is routed
+/// until this returns `Ok`, and on `Err` the connection is answered and closed.
+///
+/// # Why a failed handshake closes
+///
+/// Answering and continuing would leave an unauthenticated channel with a
+/// working path. Guessing a 256-bit token is infeasible either way, but the close
+/// is the shape that says "this connection was never established", and it means an
+/// attacker gets one guess per connection rather than one per frame.
+///
+/// # Why success sends a response
+///
+/// The client must receive an acknowledgment for its `auth` request before it can
+/// send anything else. Without it, the client blocks forever waiting for a reply
+/// that never comes, and the connection appears to hang. This function sends the
+/// success response before returning.
+async fn authenticate<S>(stream: &mut S, token: &Token) -> Result<(), ErrorBody>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let frame = match read_frame(stream).await {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return Err(ErrorBody::unauthorized(
+                "closed before authenticating".to_string(),
+            ))
+        }
+        Err(e) => {
+            // A framing error before the handshake cannot be attributed to a bad
+            // token, and saying so would let a client distinguish "your framing is
+            // wrong" from "your token is wrong". Both are refusals.
+            return Err(ErrorBody::unauthorized(format!(
+                "could not read the authentication frame: {e}"
+            )));
+        }
+    };
+
+    let request: Request = match serde_json::from_slice(&frame) {
+        Ok(r) => r,
+        Err(_) => {
+            return Err(ErrorBody::unauthorized(
+                "the first frame was not a valid request".to_string(),
+            ))
+        }
+    };
+
+    if request.jsonrpc != "2.0" || request.method != AUTH_METHOD {
+        return Err(ErrorBody::unauthorized(format!(
+            "the first frame must be a `{AUTH_METHOD}` request"
+        )));
+    }
+
+    let params: AuthParams = match serde_json::from_value(request.params) {
+        Ok(p) => p,
+        Err(_) => {
+            return Err(ErrorBody::unauthorized(
+                "the authentication request was malformed".to_string(),
+            ))
+        }
+    };
+
+    auth::verify(token, &params.token)
+        .map_err(|_| ErrorBody::unauthorized("authentication failed".to_string()))?;
+
+    // Send a success response. The client must receive this before it can send
+    // anything else. A minimal `{"result":{}}` is enough - the protocol doesn't
+    // prescribe any auth payload beyond success/failure, and the test suite
+    // expects exactly this.
+    let success = Response::ok(request.id, serde_json::json!({}));
+    write_response(stream, &success).await
+        .map_err(|_| ErrorBody::internal("could not send the authentication response"))?;
+    Ok(())
+}
+
 /// Serve one already-accepted connection until the peer stops sending.
 ///
 /// Each frame is handled independently: a request that fails is answered with an
@@ -109,36 +224,34 @@ async fn serve_connection<S>(mut stream: S, state: Arc<DaemonState>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // The gate. Everything below runs only for a connection that presented the
+    // right token, and a wrong token ends the connection here rather than being
+    // answered and then served.
+    if let Err(error) = authenticate(&mut stream, state.token()).await {
+        let _ = write_response(
+            &mut stream,
+            &Response::err(serde_json::Value::Null, error),
+        )
+        .await;
+        return;
+    }
+
     loop {
-        let prefix = match read_exact(&mut stream, PREFIX).await {
-            Ok(b) => b,
+        let body = match read_frame(&mut stream).await {
+            Ok(Some(b)) => b,
             // A clean close between frames is how a client says goodbye.
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return,
-            Err(_) => return,
-        };
-
-        let len = u32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize;
-        if len > MAX_FRAME_BYTES {
-            // Refuse and close. There is no way to resynchronise a length-prefixed
-            // stream after a bad length without guessing where the next frame
-            // starts, and guessing on a stream carrying authority requests is not
-            // a risk worth taking.
-            let _ = write_response(
-                &mut stream,
-                &Response::err(
-                    serde_json::Value::Null,
-                    ErrorBody::parse_error(format!(
-                        "frame of {len} bytes exceeds the {MAX_FRAME_BYTES}-byte limit"
-                    )),
-                ),
-            )
-            .await;
-            return;
-        }
-
-        let body = match read_exact(&mut stream, len).await {
-            Ok(b) => b,
-            Err(_) => return,
+            Ok(None) => return,
+            Err(e) => {
+                let _ = write_response(
+                    &mut stream,
+                    &Response::err(
+                        serde_json::Value::Null,
+                        ErrorBody::parse_error(format!("framing error: {e}")),
+                    ),
+                )
+                .await;
+                return;
+            }
         };
 
         let response = handle_frame(&body, &state).await;
@@ -194,6 +307,7 @@ pub async fn handle_frame(body: &[u8], state: &DaemonState) -> Response {
                 &state.model,
                 &state.ceiling,
                 state.max_concurrent_tasks,
+                state.requires_auth(),
             ))
             .unwrap_or(serde_json::Value::Null),
         ),
@@ -230,6 +344,37 @@ pub async fn handle_frame(body: &[u8], state: &DaemonState) -> Response {
     }
 }
 
+/// Serve a Unix-domain connection.
+///
+/// # Why this does not authenticate
+///
+/// The socket is created `0600` and the *kernel* enforces that at `connect` time,
+/// before a byte is exchanged. That is a stronger control than a token file: it
+/// cannot be copied, cannot go stale, and cannot be replayed from another user's
+/// session. Requiring a token here would add a second credential to get wrong in
+/// exchange for no additional security.
+///
+/// The TCP path is different because loopback has no such property — any local
+/// user can connect — which is exactly the gap [`auth`] fills.
+#[cfg(unix)]
+async fn serve_unix_connection<S>(mut stream: S, state: Arc<DaemonState>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    loop {
+        let body = match read_frame(&mut stream).await {
+            Ok(Some(b)) => b,
+            Ok(None) => return,
+            Err(_) => return,
+        };
+
+        let response = handle_frame(&body, &state).await;
+        if write_response(&mut stream, &response).await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Bind and serve on a Unix domain socket.
 ///
 /// The socket is created with mode `0600` where the platform supports it, so that
@@ -254,7 +399,22 @@ pub async fn serve_unix(
     }
 
     let listener = tokio::net::UnixListener::bind(path)?;
+    // Checked back after the bind rather than assumed. `bind` creates the file
+    // under the process umask, so a permissive umask would otherwise produce a
+    // socket any local user could connect to -- and this daemon's authority does
+    // not go out to whoever can open a socket.
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to serve on {}: the socket is mode {mode:o}, so other local \
+                 users could connect",
+                path.display()
+            ),
+        ));
+    }
 
     Ok(tokio::spawn(async move {
         loop {
@@ -264,7 +424,7 @@ pub async fn serve_unix(
             };
             let state = state.clone();
             tokio::spawn(async move {
-                serve_connection(stream, state).await;
+                serve_unix_connection(stream, state).await;
             });
         }
     }))

@@ -18,6 +18,7 @@
 
 use super::*;
 
+use crate::daemon::auth;
 use crate::daemon::grants::Ceiling;
 use crate::daemon::protocol::{
     codes, ExecuteParams, Grants, Info, Request, Response, TaskOutcome, MAX_FRAME_BYTES,
@@ -307,7 +308,7 @@ fn a_timeout_asked_for_by_a_client_is_clamped_not_obeyed() {
 
 #[test]
 fn the_daemon_advertises_that_it_cannot_ask_a_person() {
-    let info: Info = executor::describe("llama3.2:3b", &Ceiling::deny_all(), 4);
+    let info: Info = executor::describe("llama3.2:3b", &Ceiling::deny_all(), 4, false);
     assert!(!info.can_ask_human, "callers must be told before they plan around it");
     assert_eq!(info.protocol, PROTOCOL_VERSION);
     // The limitations that matter are reported, not left to be discovered.
@@ -320,15 +321,14 @@ fn the_daemon_advertises_that_it_cannot_ask_a_person() {
 // a whole request, end to end over the dispatcher
 // ---------------------------------------------------------------------------
 
+/// State with authentication switched off.
+///
+/// The tests that exercise framing, grants, and dispatch are about *those*
+/// things, and making each one authenticate first would mean a failure could mean
+/// "the handshake is broken" rather than "the thing under test is broken". The
+/// handshake gets its own tests below, over a real socket.
 fn state() -> Arc<state::DaemonState> {
-    Arc::new(state::DaemonState::new(
-        Ceiling::deny_all(),
-        Box::new(NoModel),
-        Arc::new(Mutex::new(agentos_tools::audit::MemorySink::new())),
-        Arc::new(Mutex::new(agentos_tools::audit::SystemClock)),
-        "llama3.2:3b".to_string(),
-        2,
-    ))
+    state_with(false, auth::Token::generate().unwrap())
 }
 
 #[tokio::test]
@@ -476,6 +476,487 @@ async fn a_task_that_finishes_releases_its_concurrency_permit() {
         // it returned at all.
         assert!(handle.await.unwrap().is_err());
     }
+}
+
+// ---------------------------------------------------------------------------
+// authentication
+// ---------------------------------------------------------------------------
+
+/// A private directory under the target dir, removed on drop.
+///
+/// Every token test writes to disk, and a test that wrote to the *real* default
+/// state directory would be both a false pass and a credential left lying around.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("agentosd-auth-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        Self(dir)
+    }
+
+    fn token_file(&self) -> auth::TokenFile {
+        auth::TokenFile::new(self.0.join("agentosd").join(auth::DEFAULT_TOKEN_FILE))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn a_generated_token_is_256_bits_of_hex() {
+    let token = auth::Token::generate().unwrap();
+    let hex = token.to_hex();
+    assert_eq!(hex.len(), auth::TOKEN_HEX_LEN);
+    assert_eq!(hex.len(), 64, "32 bytes of entropy is 64 hex characters");
+    assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+}
+
+#[test]
+fn two_tokens_never_collide() {
+    // 256 bits makes this astronomically unlikely, so a single collision would
+    // mean the generator is not actually random — which is exactly the failure a
+    // faked CSPRNG would produce.
+    let a = auth::Token::generate().unwrap();
+    let b = auth::Token::generate().unwrap();
+    assert_ne!(a.to_hex(), b.to_hex());
+    assert!(!a.matches(&b));
+}
+
+#[test]
+fn hex_round_trips() {
+    let token = auth::Token::generate().unwrap();
+    assert_eq!(auth::Token::parse_hex(&token.to_hex()).unwrap(), token);
+}
+
+#[test]
+fn a_malformed_token_is_rejected_rather_than_coerced() {
+    for bad in [
+        "",
+        "abc",
+        &"z".repeat(auth::TOKEN_HEX_LEN),                    // not hex
+        &"AB".repeat(auth::TOKEN_BYTES),                    // uppercase
+        &"a".repeat(auth::TOKEN_HEX_LEN + 2),               // too long
+        &"a".repeat(auth::TOKEN_HEX_LEN - 2),               // too short
+        // A valid-looking token with one character replaced by a non-hex one.
+        // Caught by the nibble check, not by the length check.
+        &format!("{}g{}", "a".repeat(auth::TOKEN_HEX_LEN - 1), ""),
+    ] {
+        assert!(
+            auth::Token::parse_hex(bad).is_err(),
+            "should have rejected {bad:?}"
+        );
+    }
+}
+
+#[test]
+fn a_token_round_trips_through_its_file() {
+    let scratch = Scratch::new("roundtrip");
+    let file = scratch.token_file();
+    let token = auth::Token::generate().unwrap();
+    file.write(&token).unwrap();
+    assert_eq!(file.read().unwrap(), token);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_token_file_is_not_readable_by_other_users() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("perms");
+    let file = scratch.token_file();
+    file.write(&auth::Token::generate().unwrap()).unwrap();
+
+    let mode = std::fs::metadata(file.path()).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the token is a credential; group and other must have nothing");
+    assert_eq!(mode & 0o077, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_token_directory_is_not_traversable_by_other_users() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("dirperm");
+    let file = scratch.token_file();
+    file.write(&auth::Token::generate().unwrap()).unwrap();
+
+    let dir = file.path().parent().unwrap();
+    let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode & 0o077, 0,
+        "a 0600 file inside a world-traversable directory still advertises that a daemon ran"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn writing_replaces_a_previous_token_rather_than_appending() {
+    // Two daemon runs must not leave two tokens in one file: the second read would
+    // return the concatenation and fail to parse, which looks like corruption.
+    let scratch = Scratch::new("replace");
+    let file = scratch.token_file();
+
+    let first = auth::Token::generate().unwrap();
+    file.write(&first).unwrap();
+    let second = auth::Token::generate().unwrap();
+    file.write(&second).unwrap();
+
+    assert_eq!(file.read().unwrap(), second);
+    assert_ne!(first, second);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_token_file_that_is_world_readable_is_refused() {
+    // A permissive file left over from an earlier run must not be silently
+    // adopted. Correcting it would overwrite evidence of whatever put it there.
+    let scratch = Scratch::new("loose");
+    let file = scratch.token_file();
+    file.write(&auth::Token::generate().unwrap()).unwrap();
+
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let error = file.write(&auth::Token::generate().unwrap()).unwrap_err();
+    assert!(
+        matches!(error, auth::AuthError::TokenFileTooPermissive { .. }),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn verify_accepts_the_right_token_and_rejects_a_wrong_one() {
+    let token = auth::Token::generate().unwrap();
+    assert!(auth::verify(&token, &token.to_hex()).is_ok());
+
+    let wrong = auth::Token::generate().unwrap();
+    assert!(auth::verify(&token, &wrong.to_hex()).is_err());
+    assert!(auth::verify(&token, "not a token").is_err());
+}
+
+#[test]
+fn the_token_is_never_rendered_by_debug_or_display() {
+    // The value reaching a log through `{:?}` or `{}` is the most likely way a
+    // credential escapes, so both renderers are checked rather than trusted.
+    let token = auth::Token::generate().unwrap();
+    let hex = token.to_hex();
+
+    assert!(!format!("{token:?}").contains(&hex));
+    assert!(!format!("{token}").contains(&hex));
+    assert!(format!("{token:?}").contains("redacted"));
+}
+
+#[test]
+fn matching_is_value_equality_not_prefix_equality() {
+    // The counterpart to the constant-time test: a `starts_with` comparison would
+    // accept any token sharing a prefix, and a prefix is the easiest thing to
+    // guess one byte at a time.
+    let token = auth::Token::generate().unwrap();
+    let hex = token.to_hex();
+
+    let mut extended = hex.clone();
+    extended.push('0');
+    assert!(auth::verify(&token, &extended).is_err(), "a longer string is not the token");
+
+    assert!(auth::verify(&token, &hex).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// the handshake gate
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_socket_is_only_served_when_it_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("agentosd-sock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("d.sock");
+
+    // `bind` creates the socket file under the process umask, so a permissive
+    // umask would otherwise yield a socket every local user could connect to. The
+    // daemon sets and then *checks* the mode; this test observes the check.
+    let handle = listener::serve_unix(&path, state()).await.unwrap();
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "the socket must be owner-only: it is the daemon's entire authority"
+    );
+
+    handle.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A TCP listener bound to an ephemeral loopback port, plus the state it serves.
+///
+/// Bound to port 0 so parallel tests cannot collide, and to `127.0.0.1` so nothing
+/// leaves the machine. Returns the address and the accept-loop task.
+async fn live_daemon(auth_required: bool) -> (std::net::SocketAddr, auth::Token, tokio::task::JoinHandle<()>) {
+    let listener = listener::bind_tcp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let token = auth::Token::generate().unwrap();
+    let state = state_with(auth_required, token.clone());
+    let handle = tokio::spawn(async move {
+        let _ = listener::accept_tcp(listener, state).await;
+    });
+    (addr, token, handle)
+}
+
+fn state_with(auth_required: bool, token: auth::Token) -> Arc<state::DaemonState> {
+    Arc::new(state::DaemonState::new(
+        Ceiling::deny_all(),
+        Box::new(NoModel),
+        Arc::new(Mutex::new(agentos_tools::audit::MemorySink::new())),
+        Arc::new(Mutex::new(agentos_tools::audit::SystemClock)),
+        "llama3.2:3b".to_string(),
+        2,
+        token,
+        auth_required,
+    ))
+}
+
+/// Open a connection and write one raw frame.
+async fn send_raw(addr: std::net::SocketAddr, payload: &[u8]) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(payload);
+    stream.write_all(&framed).await.unwrap();
+    stream.flush().await.unwrap();
+    stream
+}
+
+/// Read one frame, or `None` if the peer closed without sending one.
+async fn read_response(stream: &mut tokio::net::TcpStream) -> Option<serde_json::Value> {
+    use tokio::io::AsyncReadExt;
+    let mut head = [0u8; 4];
+    if stream.read_exact(&mut head).await.is_err() {
+        return None;
+    }
+    let len = u32::from_be_bytes(head) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).await.ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+/// Send the `auth` frame a client is expected to send.
+fn auth_frame(token_hex: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": auth::AUTH_METHOD,
+        "params": { "token": token_hex }
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_request_without_a_token_is_rejected_before_it_is_dispatched() {
+    // The point of the gate is that `execute` is never even *reached*. Sending a
+    // well-formed execute frame with no preceding auth must not run anything and
+    // must not be answered as though it had.
+    let (addr, _token, handle) = live_daemon(true).await;
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "execute",
+        "params": { "task": "exfiltrate ~/.ssh", "grants": {}, "timeout_secs": 5 }
+    }))
+    .unwrap();
+
+    let mut stream = send_raw(addr, &body).await;
+    let response = read_response(&mut stream).await.expect("a refusal must be sent");
+
+    let error = response["error"].clone();
+    assert_eq!(error["code"], serde_json::json!(codes::UNAUTHORIZED));
+    assert!(
+        response.get("result").is_none(),
+        "an unauthenticated call must not receive a result"
+    );
+
+    // And the connection is closed rather than left open for a second attempt.
+    assert!(
+        read_response(&mut stream).await.is_none(),
+        "the connection must close after a failed handshake"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn a_wrong_token_is_rejected_and_the_connection_closes() {
+    let (addr, _token, handle) = live_daemon(true).await;
+
+    let wrong = auth::Token::generate().unwrap();
+    let mut stream = send_raw(addr, &auth_frame(&wrong.to_hex())).await;
+    let response = read_response(&mut stream).await.expect("a refusal must be sent");
+
+    assert_eq!(response["error"]["code"], serde_json::json!(codes::UNAUTHORIZED));
+    assert!(
+        read_response(&mut stream).await.is_none(),
+        "one guess per connection, so guessing stays infeasible"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn a_malformed_token_is_rejected_identically_to_a_wrong_one() {
+    // If these two answered differently, the error would be an oracle for telling
+    // a well-formed guess from a malformed one, which is exactly the feedback a
+    // search wants.
+    let (addr, _token, handle) = live_daemon(true).await;
+
+    let mut wrong = send_raw(addr, &auth_frame(&"0".repeat(auth::TOKEN_HEX_LEN))).await;
+    let wrong_response = read_response(&mut wrong).await.expect("a refusal must be sent");
+
+    let mut malformed = send_raw(addr, &auth_frame("nonsense")).await;
+    let malformed_response = read_response(&mut malformed).await.expect("a refusal must be sent");
+
+    assert_eq!(
+        wrong_response["error"]["code"], malformed_response["error"]["code"],
+        "both must be the same refusal code"
+    );
+    assert_eq!(
+        wrong_response["error"]["message"], malformed_response["error"]["message"],
+        "the messages must not distinguish a malformed token from a wrong one"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn a_correct_token_is_accepted_and_requests_then_run() {
+    // The other half: the gate must not be a wall. An authenticated client has to
+    // get through, or the control is only indistinguishable from a broken daemon.
+    let (addr, token, handle) = live_daemon(true).await;
+
+    let mut stream = send_raw(addr, &auth_frame(&token.to_hex())).await;
+    let ack = read_response(&mut stream).await.expect("the handshake must be acknowledged");
+    assert!(
+        ack.get("error").is_none(),
+        "a correct token must be accepted: {}",
+        ack.get("error").cloned().unwrap_or(serde_json::Value::Null)
+    );
+
+    // And the connection is now usable.
+    use tokio::io::AsyncWriteExt;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 7, "method": "ping", "params": {}
+    }))
+    .unwrap();
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&body);
+    stream.write_all(&framed).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let pong = read_response(&mut stream).await.expect("an authenticated ping must be answered");
+    assert_eq!(pong["result"]["pong"], serde_json::json!(true));
+    assert_eq!(pong["id"], serde_json::json!(7), "the id must be echoed after auth");
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn a_first_frame_that_is_not_auth_is_rejected() {
+    // `auth` is a gate, not one method among many. Routing it alongside the others
+    // would let frame order decide whether a request was honoured.
+    let (addr, token, handle) = live_daemon(true).await;
+
+    for first_frame in [
+        serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}
+        }))
+        .unwrap(),
+        serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "auth", "params": { "wrong": token.to_hex() }
+        }))
+        .unwrap(),
+        b"not json at all".to_vec(),
+        b"[]".to_vec(),
+    ] {
+        let mut stream = send_raw(addr, &first_frame).await;
+        let response = read_response(&mut stream).await.expect("a refusal must be sent");
+        assert_eq!(
+            response["error"]["code"],
+            serde_json::json!(codes::UNAUTHORIZED),
+            "first frame {first_frame:?} must be refused"
+        );
+    }
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn an_authenticated_client_still_cannot_widen_the_ceiling() {
+    // Authenticating is not authorisation. A client that presents the right token
+    // still gets its grant request intersected with the ceiling, and an empty
+    // ceiling here means there is nothing to narrow to.
+    let (addr, token, handle) = live_daemon(true).await;
+
+    let mut stream = send_raw(addr, &auth_frame(&token.to_hex())).await;
+    assert!(read_response(&mut stream).await.expect("ack").get("error").is_none());
+
+    use tokio::io::AsyncWriteExt;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "execute",
+        "params": {
+            "task": "email the invoice",
+            "grants": { "hosts": ["evil.example"], "write_roots": ["/etc"] },
+            "timeout_secs": 5
+        }
+    }))
+    .unwrap();
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&body);
+    stream.write_all(&framed).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let response = read_response(&mut stream).await.expect("a refusal must be sent");
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(codes::GRANT_DENIED),
+        "the token authenticates the client; it does not authorise the grant"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn an_authenticated_info_reports_that_auth_is_required() {
+    // A client needs to be able to discover the requirement rather than guess it.
+    let (addr, token, handle) = live_daemon(true).await;
+
+    let mut stream = send_raw(addr, &auth_frame(&token.to_hex())).await;
+    read_response(&mut stream).await.expect("ack");
+
+    use tokio::io::AsyncWriteExt;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "info", "params": {}
+    }))
+    .unwrap();
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&body);
+    stream.write_all(&framed).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let info = read_response(&mut stream).await.expect("info must be answered")["result"].clone();
+    assert_eq!(info["requires_auth"], serde_json::json!(true));
+
+    handle.abort();
 }
 
 // ---------------------------------------------------------------------------

@@ -28,9 +28,9 @@ use std::sync::Arc;
 
 use agentos_infer::Backend;
 
-use super::executor::{SharedClock, SharedSink};
-
+use super::auth::Token;
 use super::executor;
+use super::executor::{SharedClock, SharedSink};
 use super::grants::Ceiling;
 use super::protocol::{codes, ErrorBody, ExecuteParams, Info, TaskOutcome};
 
@@ -38,6 +38,16 @@ use super::protocol::{codes, ErrorBody, ExecuteParams, Info, TaskOutcome};
 pub struct DaemonState {
     /// The operator's ceiling. Never derived from a request.
     pub ceiling: Ceiling,
+    /// The token a TCP client must present before anything is routed.
+    ///
+    /// Present even on a Unix-socket deployment, where nothing reads it, so the
+    /// type never has to carry an `Option` whose absence would silently mean "no
+    /// authentication required". The Unix path simply does not consult it; see
+    /// `listener::serve_unix_connection` for why that is correct rather than a
+    /// gap.
+    token: Token,
+    /// Whether a client must present [`Self::token`] before anything is routed.
+    requires_auth: bool,
     /// The model. Held in an async mutex because `complete` needs `&mut` and the
     /// run happens on a blocking thread.
     backend: Arc<tokio::sync::Mutex<Box<dyn Backend + Send>>>,
@@ -62,9 +72,13 @@ impl DaemonState {
         clock: SharedClock,
         model: String,
         max_concurrent_tasks: usize,
+        token: Token,
+        requires_auth: bool,
     ) -> Self {
         Self {
             ceiling,
+            token,
+            requires_auth,
             backend: Arc::new(tokio::sync::Mutex::new(backend)),
             audit_sink,
             clock,
@@ -135,9 +149,28 @@ impl DaemonState {
         }
     }
 
+    /// The token a TCP client must present.
+    pub fn token(&self) -> &Token {
+        &self.token
+    }
+
+    /// Whether this daemon's transport requires the token.
+    ///
+    /// Set at construction from how the daemon was started. The Unix path leaves
+    /// this `false` and does not check the token, which is correct: the kernel
+    /// enforces the socket's `0600` mode at connect time.
+    pub fn requires_auth(&self) -> bool {
+        self.requires_auth
+    }
+
     /// Report what this daemon is and can do.
     pub fn info(&self) -> Info {
-        executor::describe(&self.model, &self.ceiling, self.max_concurrent_tasks)
+        executor::describe(
+            &self.model,
+            &self.ceiling,
+            self.max_concurrent_tasks,
+            self.requires_auth,
+        )
     }
 }
 

@@ -362,10 +362,16 @@ pub fn build_backend(model: &str) -> Ollama {
 /// `limitations` is not decoration. The most expensive kind of wrong in a daemon
 /// is a caller believing it is confined when it is not, so the things this build
 /// does not do are reported as plainly as the things it does.
+///
+/// `requires_auth` is passed in rather than inferred, because whether this
+/// transport is authenticated is a property of how the daemon was *started*, not
+/// of anything reachable from here — a caller reading `info` needs the fact, and
+/// guessing it from the absence of a token would be the wrong default.
 pub fn describe(
     model: &str,
     ceiling: &Ceiling,
     max_concurrent_tasks: usize,
+    requires_auth: bool,
 ) -> Info {
     let mut limitations = vec![
         "this build cannot ask a person for approval; any task that policy halts \
@@ -399,6 +405,7 @@ pub fn describe(
         send_email_enabled: ceiling.mail_outbox.is_some(),
         max_concurrent_tasks,
         can_ask_human: false,
+        requires_auth,
         limitations,
     }
 }

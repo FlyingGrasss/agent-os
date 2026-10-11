@@ -55,6 +55,7 @@
 //! reach a host, or send mail. A mistyped variable produces an inert daemon rather
 //! than an unrestricted one.
 
+pub mod auth;
 pub mod executor;
 pub mod grants;
 pub mod listener;
@@ -126,6 +127,30 @@ async fn serve() -> Result<(), String> {
     let ceiling = ceiling_from_env();
     let listen = listen_from_env()?;
 
+    // --- the startup token ---------------------------------------------------
+    //
+    // Generated for the TCP transport, where loopback offers no protection of its
+    // own. The Unix path does not need it: its socket is `0600` and the kernel
+    // checks that at connect time, which is a stronger control than a file a
+    // client has to remember to read.
+    //
+    // Written only for TCP. Writing it unconditionally would leave a credential on
+    // disk that nothing reads, which is the wrong direction to err in.
+    //
+    // This happens *before* the listener binds, so there is no window in which the
+    // socket is accepting connections and a client cannot find the token.
+    let token_file = auth::TokenFile::new(auth::TokenFile::default_path());
+    let needs_token = matches!(listen, Listen::Tcp(_));
+    let token = auth::Token::generate().map_err(|e| e.to_string())?;
+    if needs_token {
+        token_file.write(&token).map_err(|e| {
+            format!(
+                "{e}\n(the TCP socket needs this token to be usable, so the daemon refuses \
+                 to start without it)"
+            )
+        })?;
+    }
+
     // The audit log is opened before anything can run. Invariant I6 says every
     // action is recorded before it executes, and a daemon that started and then
     // failed to open its log would have a window where it acts without recording.
@@ -170,11 +195,13 @@ async fn serve() -> Result<(), String> {
         clock,
         model,
         max_concurrent,
+        token,
+        needs_token,
     ));
 
-    report_configuration(&state);
+    report_configuration(&state, &token_file, needs_token);
 
-    match listen {
+    let outcome = match listen {
         #[cfg(unix)]
         Listen::Unix(path) => {
             let handle = listener::serve_unix(&path, state.clone())
@@ -195,6 +222,13 @@ async fn serve() -> Result<(), String> {
                 _ => format!("cannot listen on {addr}: {e}"),
             })?;
             eprintln!("agentosd: listening on {addr}");
+            if needs_token {
+                // The path, never the value. Printing the token would put it in
+                // whatever collects this output -- a systemd journal, a terminal
+                // scrollback, a CI log -- which is exactly the set of places a
+                // credential must not reach.
+                eprintln!("agentosd: authentication token: {}", token_file.path().display());
+            }
             tokio::select! {
                 result = listener::accept_tcp(listener, state) => {
                     result.map_err(|e| format!("accept loop failed on {addr}: {e}"))
@@ -202,7 +236,19 @@ async fn serve() -> Result<(), String> {
                 _ = wait_for_signal() => Ok(()),
             }
         }
+    };
+
+    // Remove the token on a clean exit, so a stopped daemon leaves no credential
+    // behind. A stale token is a credential for a socket that is no longer
+    // listening and may come back on the same port. Best-effort: a failure here
+    // must not turn a successful shutdown into an error, but it is reported.
+    if needs_token {
+        if let Err(e) = token_file.remove() {
+            eprintln!("agentosd: could not remove the token file: {e}");
+        }
     }
+
+    outcome
 }
 
 /// Build the operator's ceiling from the environment.
@@ -260,7 +306,7 @@ fn listen_from_env() -> Result<Listen, String> {
 /// The limitations are the point of the exercise. A caller that believes tools are
 /// confined when they are not is the most expensive kind of wrong available here,
 /// and the only defence is to say so before it matters.
-fn report_configuration(state: &Arc<DaemonState>) {
+fn report_configuration(state: &Arc<DaemonState>, token_file: &auth::TokenFile, needs_token: bool) {
     let info = state.info();
     eprintln!("agentosd: protocol {}", info.protocol);
     eprintln!("agentosd: max concurrent tasks: {}", info.max_concurrent_tasks);
@@ -282,6 +328,26 @@ fn report_configuration(state: &Arc<DaemonState>) {
         eprintln!("agentosd: send_email: enabled (outbox configured)");
     } else {
         eprintln!("agentosd: send_email: unavailable (no AGENTOSD_MAIL_OUTBOX)");
+    }
+    // Whether this transport is authenticated, stated rather than assumed. A user
+    // reading this log needs to know whether reaching the socket means reaching
+    // the daemon, and the two transports differ.
+    eprintln!(
+        "agentosd: authentication: {}",
+        if needs_token {
+            format!(
+                "bearer token required (first frame must be `{}`)",
+                auth::AUTH_METHOD
+            )
+        } else {
+            "filesystem permissions on the socket (mode 0600)".to_string()
+        }
+    );
+    if !needs_token {
+        eprintln!(
+            "agentosd: no token was written; {} is not used on this transport",
+            token_file.path().display()
+        );
     }
     for limitation in &info.limitations {
         eprintln!("agentosd: limitation: {limitation}");

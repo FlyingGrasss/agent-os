@@ -266,6 +266,15 @@ impl ErrorBody {
     pub fn grant_denied(message: impl Into<String>) -> Self {
         Self { code: codes::GRANT_DENIED, message: message.into(), data: None }
     }
+
+    /// The connection did not present this daemon's startup token.
+    ///
+    /// Only ever sent on the TCP transport, before any request is routed. The
+    /// message never says *how* the token was wrong: a caller must not be able to
+    /// tell a malformed token from a well-formed wrong one.
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self { code: codes::UNAUTHORIZED, message: message.into(), data: None }
+    }
 }
 
 /// Standard and AgentOS-specific error codes.
@@ -288,6 +297,8 @@ pub mod codes {
     pub const NEEDS_HUMAN: i32 = -32002;
     /// The requested capability exceeds the daemon's configured ceiling.
     pub const GRANT_DENIED: i32 = -32003;
+    /// The connection did not authenticate. Sent only on the TCP transport.
+    pub const UNAUTHORIZED: i32 = -32004;
 }
 
 /// What the daemon reports about itself and the host it runs on.
@@ -309,6 +320,12 @@ pub struct Info {
     /// can ask someone" would otherwise silently get a system that refuses. See
     /// `executor::NEEDS_HUMAN`.
     pub can_ask_human: bool,
+    /// Whether this daemon requires a bearer token on its transport.
+    ///
+    /// True on TCP loopback, where any local user could otherwise connect. False
+    /// on a Unix socket, where the `0600` mode is enforced by the kernel at
+    /// connect time. A client reads this rather than guessing which it is on.
+    pub requires_auth: bool,
     /// What this build cannot do, in the caller's terms.
     pub limitations: Vec<String>,
 }
