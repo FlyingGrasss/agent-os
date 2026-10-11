@@ -161,3 +161,12 @@ pub fn ask_with(request: &ConfirmationRequest, answer: &str, interactive: bool) 
     let _ = request;
     decide(answer, interactive)
 }
+
+/// The long-running privileged daemon.
+///
+/// A library module rather than a binary so that its framing, its grant narrowing,
+/// and its refusal behaviour can be tested without binding a port or starting a
+/// process. The binary is a three-line shim over [`daemon::main`].
+pub mod daemon;
+
+

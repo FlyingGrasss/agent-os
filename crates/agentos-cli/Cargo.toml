@@ -16,6 +16,12 @@ path = "src/lib.rs"
 name = "agentos"
 path = "src/main.rs"
 
+[[bin]]
+name = "agentosd"
+path = "src/daemon/main.rs"
+
+
+
 [dependencies]
 agentos-types = { workspace = true }
 agentos-policy = { workspace = true }
@@ -28,3 +34,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["codec"] }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
