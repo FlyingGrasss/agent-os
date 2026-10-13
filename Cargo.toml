@@ -29,6 +29,7 @@ agentos-policy = { path = "crates/agentos-policy" }
 agentos-core = { path = "crates/agentos-core" }
 agentos-infer = { path = "crates/agentos-infer" }
 agentos-sandbox = { path = "crates/agentos-sandbox" }
+agentos-events = { path = "crates/agentos-events" }
 agentos-tools = { path = "crates/agentos-tools" }
 agentos-quarantine = { path = "crates/agentos-quarantine" }
 agentos-eval = { path = "crates/agentos-eval" }

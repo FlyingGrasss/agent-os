@@ -27,6 +27,7 @@ agentos-types = { workspace = true }
 agentos-policy = { workspace = true }
 agentos-core = { workspace = true }
 agentos-dsl = { workspace = true }
+agentos-events = { workspace = true }
 agentos-pager = { path = "../agentos-pager" }
 agentos-tools = { workspace = true }
 agentos-infer = { workspace = true, features = ["ollama"] }

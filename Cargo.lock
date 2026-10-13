@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "agentos-core",
  "agentos-dsl",
+ "agentos-events",
  "agentos-infer",
  "agentos-pager",
  "agentos-policy",

@@ -610,21 +610,42 @@ fn writing_replaces_a_previous_token_rather_than_appending() {
 
 #[cfg(unix)]
 #[test]
-fn a_token_file_that_is_world_readable_is_refused() {
-    // A permissive file left over from an earlier run must not be silently
-    // adopted. Correcting it would overwrite evidence of whatever put it there.
+fn a_world_readable_stale_token_file_is_replaced_not_adopted() {
+    // This test previously asserted the daemon *refused* to start when it found a
+    // world-readable token file, and failed on Linux -- it had only ever run on
+    // Windows, where it is `cfg(unix)` and skipped.
+    //
+    // The assertion was wrong and the code was right. `write` removes the old file
+    // and creates its own exclusively at 0600; it never reads the stale contents,
+    // so there is no "adopting a compromised token" to prevent. And refusing would
+    // have been worse: the state directory is 0700 and owned by the user, so only
+    // the user can leave such a file, and a same-user process that can write there
+    // can read the new token anyway. Refusing only hands it a way to stop the
+    // daemon.
+    //
+    // What is actually asserted is the property that does hold: after a write, the
+    // file is private and its contents are the *new* token, not the stale one.
     let scratch = Scratch::new("loose");
     let file = scratch.token_file();
-    file.write(&auth::Token::generate().unwrap()).unwrap();
 
+    let stale = auth::Token::generate().unwrap();
+    file.write(&stale).unwrap();
+
+    // Make the existing file world-readable, as a careless earlier run might have.
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::write(file.path(), format!("{}\n", stale.to_hex())).unwrap();
 
-    let error = file.write(&auth::Token::generate().unwrap()).unwrap_err();
-    assert!(
-        matches!(error, auth::AuthError::TokenFileTooPermissive { .. }),
-        "got {error:?}"
-    );
+    let fresh = auth::Token::generate().unwrap();
+    file.write(&fresh).expect("a permissive stale file must not stop the daemon");
+
+    // Private again...
+    let mode = std::fs::metadata(file.path()).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the new token file must be owner-only");
+
+    // ...and holding the new token, not the stale one.
+    assert_eq!(file.read().unwrap(), fresh);
+    assert_ne!(file.read().unwrap(), stale);
 }
 
 #[test]

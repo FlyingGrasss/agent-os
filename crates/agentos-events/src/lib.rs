@@ -40,8 +40,10 @@
 pub mod audit;
 pub mod event;
 pub mod hash;
+pub mod inbox;
 pub mod probe;
 
 pub use audit::{Chain, ChainError, Record, Verifier};
 pub use event::{decode, decode_prefix, encode, DecodeError, Event, NameHash, OpenFlags};
+pub use inbox::{Inbox, InboxEntry, InboxError, InboxEvent, SkipReason};
 pub use probe::{probe, Report as ProbeReport};

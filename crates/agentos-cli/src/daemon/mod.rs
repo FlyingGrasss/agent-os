@@ -58,6 +58,7 @@
 pub mod auth;
 pub mod executor;
 pub mod grants;
+pub mod inbox_loop;
 pub mod listener;
 pub mod protocol;
 pub mod state;
@@ -201,6 +202,22 @@ async fn serve() -> Result<(), String> {
 
     report_configuration(&state, &token_file, needs_token);
 
+    // --- the ambient inbox ---------------------------------------------------
+    //
+    // Spawned before the listener so an inbox event can be in flight while the
+    // socket is still binding. Off unless `AGENTOS_INBOX` is set or the default
+    // path already exists: a daemon that created its own inbox directory would be
+    // creating the directory whose contents it then trusts enough to act on, which
+    // is a strange thing for a program to do on its own initiative.
+    let inbox_handle = start_inbox(&state).await;
+    if inbox_handle.is_none() {
+        // Said out loud rather than left to be discovered. A user who drops a file
+        // in the inbox and gets no response needs to know the feature is off, and
+        // the most likely reason is that they never enabled it.
+        eprintln!("agentosd: ambient inbox monitoring: OFF (set AGENTOS_INBOX, or create {})",
+            inbox_loop::default_inbox_path().display());
+    }
+
     let outcome = match listen {
         #[cfg(unix)]
         Listen::Unix(path) => {
@@ -249,6 +266,74 @@ async fn serve() -> Result<(), String> {
     }
 
     outcome
+}
+
+/// Start the ambient inbox watcher, if one is configured.
+///
+/// Returns what happened so the daemon can report it rather than leaving a caller
+/// to assume ambient monitoring is on.
+///
+/// # Why the default path existing is the only implicit opt-in
+///
+/// The watcher needs a directory it did not choose. If it created one, the program
+/// would be creating the very directory whose contents it treats as a reason to
+/// wake an agent — and a directory created by a privileged process is a directory
+/// somebody else can write to. So the inbox runs only when the operator asked for
+/// it explicitly (`AGENTOS_INBOX`) or when the conventional path is already there,
+/// which is the same rule the daemon uses for everything else: the operator
+/// configures, the operator's configuration is the authority.
+async fn start_inbox(state: &Arc<DaemonState>) -> Option<tokio::task::JoinHandle<()>> {
+    let path = inbox_loop::default_inbox_path();
+    let explicitly_set = std::env::var("AGENTOS_INBOX")
+        .ok()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+
+    if !path.is_dir() {
+        if explicitly_set {
+            // The operator named a directory that is not there. That is a
+            // configuration error worth saying out loud rather than silently
+            // running without the feature the operator asked for.
+            eprintln!("agentosd: AGENTOS_INBOX is set to {} but that is not a directory", path.display());
+            eprintln!("         ambient inbox monitoring is DISABLED");
+        }
+        return None;
+    }
+
+    let inbox = match agentos_events::inbox::Inbox::open(&path) {
+        Ok(inbox) => inbox,
+        Err(e) => {
+            eprintln!("agentosd: cannot watch the inbox at {}: {e}", path.display());
+            return None;
+        }
+    };
+
+    // The watcher needs the same model as the IPC path, and `Backend::complete`
+    // takes `&mut self`. Rather than a second backend (a second 2 GB model on a
+    // host with ~6 GB free), the watcher borrows the same one behind the same
+    // lock. An inbox task and a CLI task therefore cannot run concurrently, which
+    // is a throughput property and not a safety one: they share no `PolicyHost`
+    // and no grants.
+    let shared = state.backend_handle();
+    let ceiling = Arc::new(state.ceiling.clone());
+    let sink = state.audit_sink_handle();
+    let clock = state.clock_handle();
+
+    eprintln!("agentosd: watching the inbox at {}", path.display());
+    eprintln!("         dropped .txt/.html/.json/.md files are summarized with NO grants");
+    eprintln!("         anything needing approval halts at needs_human (this daemon cannot ask)");
+
+    Some(tokio::spawn(async move {
+        // `watch` takes the shared backend handle and locks it only around each
+        // run, so the model is free between payloads. See `watch` for why that
+        // matters more than it looks.
+        inbox_loop::watch(inbox, shared, ceiling, sink, clock, |_handled| {
+            // Per-item reporting already happened on stderr inside the loop. The
+            // callback exists so a caller can observe handling without the loop
+            // knowing who is listening.
+        })
+        .await;
+    }))
 }
 
 /// Build the operator's ceiling from the environment.

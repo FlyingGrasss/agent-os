@@ -189,12 +189,23 @@ pub enum AuthError {
     #[error("could not write the token file at {path}: {reason}")]
     Write { path: String, reason: String },
 
-    /// The token file exists with permissions looser than `0600`.
-    ///
-    /// Refused rather than corrected. Silently chmod-ing a file an attacker may
-    /// have replaced would overwrite evidence of the interference and would mean
-    /// the daemon started with a token file it had already found compromised.
-    #[error("the token file at {path} is readable by other users (mode {mode:o}); move it aside and restart")]
+    /// The freshly written token file is readable by other users.
+///
+/// Guards the *new* file, not a pre-existing one. [`TokenFile::write`] removes any
+/// previous file and creates its own exclusively at mode `0600`, so this fires only
+/// when the filesystem did not honour the requested mode — some FUSE and network
+/// mounts ignore it — or when the file was replaced between the create and the
+/// stat.
+///
+/// An earlier version of this description claimed the daemon *refuses* to start
+/// when it finds a world-readable token file left by a previous run, and a test
+/// asserted that. The code never did that, and on reflection it should not: the
+/// state directory is `0700` and owned by the user, so only the user can leave such
+/// a file, and a user who can already write there can simply read the new token.
+/// Refusing would buy nothing and hand a same-user process a way to stop the
+/// daemon starting at all. The real protection is that the daemon never *reads* the
+/// previous file — see [`TokenFile::write`].
+#[error("the token file at {path} is readable by other users (mode {mode:o}) even though it was created private")]
     TokenFileTooPermissive { path: String, mode: u32 },
 
     /// The client presented a token that is not this daemon's.

@@ -33,18 +33,18 @@
 //! failure is distinct from an auth failure which is distinct from a task
 //! refusal, so a script can distinguish them.
 
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
 use crate::daemon::protocol::{
-    codes, ErrorBody, Info, Request, Response, TaskOutcome, MAX_FRAME_BYTES,
+    Info, Request, Response, TaskOutcome, MAX_FRAME_BYTES,
 };
-use crate::daemon::protocol::{ExecuteParams as ProtoExecuteParams, Grants as ProtoGrants};
+use crate::daemon::protocol::ExecuteParams as ProtoExecuteParams;
 use crate::daemon::auth::AuthParams;
 
 /// Re-export the protocol types for CLI use.
@@ -310,16 +310,17 @@ impl Client {
     }
 
     /// Dispatch a task and return the outcome.
-    pub fn execute(
-        &mut self,
-        task: String,
-        grants: ProtoExecuteParams,
-    ) -> Result<TaskOutcome, String> {
+    ///
+    /// The task text comes from `params.task` rather than a separate argument. An
+    /// earlier version took both, which meant two copies of the task text that a
+    /// caller could disagree about -- and disagreeing copies are how a client ends
+    /// up showing the user one task and sending another.
+    pub fn execute(&mut self, params: ProtoExecuteParams) -> Result<TaskOutcome, String> {
         let req = Request {
             jsonrpc: "2.0".to_string(),
             id: serde_json::json!(1),
             method: "execute".to_string(),
-            params: serde_json::to_value(grants).unwrap(),
+            params: serde_json::to_value(params).unwrap(),
         };
         self.send_frame(&req).map_err(|e| format!("failed to send execute: {e}"))?;
 
@@ -437,10 +438,7 @@ pub fn render_outcome(result: TaskOutcome) -> String {
 /// Send a request over the wire and print the outcome.
 ///
 /// Returns the exit code the CLI should use.
-pub fn dispatch(
-    task: String,
-    grants: ProtoExecuteParams,
-) -> Result<std::process::ExitCode, String> {
+pub fn dispatch(params: ProtoExecuteParams) -> Result<std::process::ExitCode, String> {
     let endpoint = discover_endpoint();
     let token = if matches!(endpoint, DaemonEndpoint::Tcp(_)) {
         Some(AuthToken::read()?)
@@ -456,7 +454,7 @@ pub fn dispatch(
         DaemonEndpoint::Tcp(a) => eprintln!("agentos: connected via TCP {}", a),
     }
 
-    let result = client.execute(task, grants)?;
+    let result = client.execute(params)?;
     let exit_code = match &result {
         TaskOutcome::Completed { .. } => std::process::ExitCode::SUCCESS,
         TaskOutcome::Refused { .. } => std::process::ExitCode::from(3),

@@ -163,6 +163,26 @@ impl DaemonState {
         self.requires_auth
     }
 
+    /// The model backend, shared with the ambient inbox watcher.
+    ///
+    /// Exposed so the watcher can borrow the *same* backend rather than loading a
+    /// second copy of a 3B model. The mutex is what makes that safe rather than a
+    /// data race: `complete` takes `&mut self`, so a second handle would be a
+    /// second model, not a concurrent use of one.
+    pub fn backend_handle(&self) -> Arc<tokio::sync::Mutex<Box<dyn Backend + Send>>> {
+        self.backend.clone()
+    }
+
+    /// The shared audit sink.
+    pub fn audit_sink_handle(&self) -> SharedSink {
+        self.audit_sink.clone()
+    }
+
+    /// The shared clock.
+    pub fn clock_handle(&self) -> SharedClock {
+        self.clock.clone()
+    }
+
     /// Report what this daemon is and can do.
     pub fn info(&self) -> Info {
         executor::describe(

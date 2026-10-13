@@ -45,7 +45,7 @@ use agentos_policy::{PolicyEngine, RuleSet};
 use agentos_tools::audit::{AuditLog, AuditSink, FileSink, SystemClock};
 use agentos_tools::http::{install_policy_rules, FetchGrant, HttpFetch};
 use agentos_tools::{FsWrite, PolicyHost, WriteGrant};
-use agentos_types::{ControllerAuthority, Origin, Quarantined, SourceId, Trusted, UserId, Val};
+use agentos_types::{ControllerAuthority, Origin, Quarantined, SourceId, Trusted, Val};
 
 const USAGE: &str = "\
 agentos - run a task with real privileges and a real policy engine
@@ -183,7 +183,7 @@ fn cmd_run(args: &[String]) -> Result<std::process::ExitCode, String> {
     };
 
     // Try to dispatch to the daemon first
-    match dispatch(task.clone(), grants) {
+    match dispatch(grants) {
         Ok(code) => return Ok(code),
         Err(e) => eprintln!("agentos: daemon error: {}", e),
     }
