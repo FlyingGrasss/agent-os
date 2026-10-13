@@ -1,0 +1,74 @@
+[Unit]
+Description=AgentOS Daemon (agentosd)
+Documentation=https://github.com/agent-os/agent-os
+After=network.target
+Wants=network.target
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateUsers=false
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Capability restrictions
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Filesystem access - only allow specific paths
+ReadWritePaths=%h/.local/state/agentosd
+ReadWritePaths=%h/.local/share/agentos/inbox
+ReadOnlyPaths=%h/.config/agentos
+
+# Network access - only loopback
+IPAddressAllow=127.0.0.1
+IPAddressDeny=any
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/agentosd
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=2G
+CPUQuota=200%
+
+# Environment
+Environment=AGENTOS_STATE_DIR=%h/.local/state/agentosd
+Environment=AGENTOS_INBOX=%h/.local/share/agentos/inbox
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentosd
+
+# Working directory
+WorkingDirectory=%h
+
+# User/service isolation
+User=%i
+Group=%i
+
+[Install]
+WantedBy=default.target

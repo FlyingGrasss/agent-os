@@ -54,6 +54,7 @@ USAGE:
   agentos run [OPTIONS] <TASK>
   agentos repl [OPTIONS]
   agentos check
+  agentos service <SUBCOMMAND>
 
 OPTIONS:
   --model <NAME>          Ollama model for the planner (default llama3.2:3b)
@@ -67,6 +68,17 @@ look identical from the outside.
 
 `repl` starts an interactive session with the daemon. Tasks are sent in your
 words; confirmations are a person or nothing. A piped stdin gets no approvals.
+
+`service` manages the agentosd systemd service:
+  agentos service install [--user|--system] [--prefix PATH]  Install and enable the service
+  agentos service uninstall                              Uninstall the service
+  agentos service start                                  Start the service
+  agentos service stop                                   Stop the service
+  agentos service restart                                Restart the service
+  agentos service status                                 Show service status
+  agentos service logs [-f]                              Show service logs (follow with -f)
+  agentos service enable                                 Enable service at boot
+  agentos service disable                                Disable service at boot
 ";
 
 fn main() -> std::process::ExitCode {
@@ -91,6 +103,7 @@ fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
         "run" => cmd_run(&args[1..]),
         "repl" => cmd_repl(&args[1..]),
         "check" => cmd_check(),
+        "service" => cmd_service(&args[1..]),
         "help" | "--help" | "-h" => {
             print!("{USAGE}");
             Ok(std::process::ExitCode::SUCCESS)
@@ -531,4 +544,180 @@ impl agentos_infer::Extractor for Passthrough {
             quarantined_fields: vec!["text".into()],
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// service subcommand
+// ---------------------------------------------------------------------------
+
+use std::process::Command;
+
+/// Manage the agentosd systemd service.
+fn cmd_service(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let Some(subcommand) = args.first() else {
+        eprintln!("Usage: agentos service <SUBCOMMAND>");
+        eprintln!("Subcommands: install, uninstall, start, stop, restart, status, logs, enable, disable");
+        return Ok(std::process::ExitCode::from(2));
+    };
+
+    match subcommand.as_str() {
+        "install" => cmd_service_install(&args[1..]),
+        "uninstall" => cmd_service_uninstall(&args[1..]),
+        "start" => cmd_service_control("start", &args[1..]),
+        "stop" => cmd_service_control("stop", &args[1..]),
+        "restart" => cmd_service_control("restart", &args[1..]),
+        "status" => cmd_service_control("status", &args[1..]),
+        "logs" => cmd_service_logs(&args[1..]),
+        "enable" => cmd_service_control("enable", &args[1..]),
+        "disable" => cmd_service_control("disable", &args[1..]),
+        other => Err(format!("unknown service subcommand `{other}`")),
+    }
+}
+
+fn cmd_service_install(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let mut mode = "user";
+    let mut prefix = "/usr/local".to_string();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--user" => mode = "user",
+            "--system" => mode = "system",
+            "--prefix" => {
+                i += 1;
+                prefix = args.get(i).ok_or("--prefix needs a value")?.clone();
+            },
+            other => return Err(format!("unknown install option `{other}`")),
+        }
+        i += 1;
+    }
+
+    // Build the install script path
+    let script_path = find_install_script()?;
+    
+    let mut cmd = Command::new("bash");
+    cmd.arg(&script_path)
+        .arg(format!("--{}", mode))
+        .arg("--prefix")
+        .arg(prefix);
+
+    let status = cmd.status().map_err(|e| format!("failed to run install script: {e}"))?;
+    
+    if status.success() {
+        println!("Service installed successfully!");
+        Ok(std::process::ExitCode::SUCCESS)
+    } else {
+        Err("Installation failed".into())
+    }
+}
+
+fn cmd_service_uninstall(_args: &[String]) -> Result<std::process::ExitCode, String> {
+    // Determine if user or system mode by checking service existence
+    let is_user = service_exists_user()?;
+    
+    let (systemctl, _service_name) = if is_user {
+        ("systemctl --user", "agentosd")
+    } else {
+        ("sudo systemctl", "agentosd")
+    };
+
+    // Stop and disable
+    run_systemctl(systemctl, &["stop".to_string(), "agentosd".to_string()])?;
+    run_systemctl(systemctl, &["disable".to_string(), "agentosd".to_string()])?;
+
+    // Remove service file
+    let service_path = if is_user {
+        dirs::home_dir()
+            .ok_or("home directory not found")?
+            .join(".config/systemd/user/agentosd.service")
+    } else {
+        std::path::PathBuf::from("/etc/systemd/system/agentosd.service")
+    };
+
+    if service_path.exists() {
+        std::fs::remove_file(&service_path).map_err(|e| format!("failed to remove service file: {e}"))?;
+    }
+
+    // Reload systemd
+    run_systemctl(systemctl, &["daemon-reload".to_string()])?;
+
+    println!("Service uninstalled successfully!");
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn cmd_service_control(action: &str, args: &[String]) -> Result<std::process::ExitCode, String> {
+    // Determine if user or system mode
+    let is_user = service_exists_user()?;
+    let systemctl = if is_user { "systemctl --user" } else { "sudo systemctl" };
+
+    let mut args_vec = vec![action.to_string(), "agentosd".to_string()];
+    args_vec.extend(args.iter().cloned());
+
+    run_systemctl(systemctl, &args_vec)?;
+
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn cmd_service_logs(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let is_user = service_exists_user()?;
+    let systemctl = if is_user { "systemctl --user" } else { "sudo systemctl" };
+
+    let mut args_vec = vec!["logs".to_string(), "-u".to_string(), "agentosd".to_string()];
+    args_vec.extend(args.iter().cloned());
+
+    run_systemctl(systemctl, &args_vec)?;
+
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn service_exists_user() -> Result<bool, String> {
+    // Check if user service file exists
+    let user_service = dirs::home_dir()
+        .ok_or("home directory not found")?
+        .join(".config/systemd/user/agentosd.service");
+    
+    if user_service.exists() {
+        return Ok(true);
+    }
+
+    // Check system service
+    let system_service = std::path::Path::new("/etc/systemd/system/agentosd.service");
+    Ok(!system_service.exists())
+}
+
+fn run_systemctl(systemctl: &str, args: &[String]) -> Result<(), String> {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(format!("{} {}", systemctl, args.join(" ")));
+    
+    let status = cmd.status().map_err(|e| format!("failed to run systemctl: {e}"))?;
+    
+    if !status.success() {
+        return Err(format!("systemctl {} failed with status: {}", args.join(" "), status));
+    }
+    Ok(())
+}
+
+fn find_install_script() -> Result<std::path::PathBuf, String> {
+    // Try to find the install script relative to the binary
+    let current_exe = std::env::current_exe().map_err(|e| format!("failed to get current exe: {e}"))?;
+    let script_path = current_exe
+        .parent()
+        .ok_or("binary has no parent directory")?
+        .join("../scripts/install.sh");
+    
+    if script_path.exists() {
+        return Ok(script_path);
+    }
+
+    // Try from workspace root
+    let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    
+    let script_path = workspace_root.join("scripts/install.sh");
+    if script_path.exists() {
+        return Ok(script_path);
+    }
+
+    Err("install.sh not found. Run from workspace root or install agentos-cli from source.".into())
 }
