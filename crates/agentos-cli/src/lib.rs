@@ -172,6 +172,9 @@ pub mod daemon;
 /// Client for connecting to the daemon.
 pub mod client;
 
+/// Interactive REPL over the daemon.
+pub mod repl;
+
 /// Shared utilities for the CLI.
 pub mod util;
 

@@ -42,9 +42,9 @@ use std::time::Duration;
 use std::os::unix::net::UnixStream;
 
 use crate::daemon::protocol::{
-    Info, Request, Response, TaskOutcome, MAX_FRAME_BYTES,
+    ExecuteParams as ProtoExecuteParams, Info, Request, Response, TaskOutcome, MAX_FRAME_BYTES,
 };
-use crate::daemon::protocol::ExecuteParams as ProtoExecuteParams;
+
 use crate::daemon::auth::AuthParams;
 
 /// Re-export the protocol types for CLI use.
@@ -279,6 +279,14 @@ impl Client {
         Ok(client)
     }
 
+    /// Return a human-readable description of the endpoint.
+    pub fn endpoint_str(&self) -> Option<String> {
+        match &self.endpoint {
+            DaemonEndpoint::Unix(p) => Some(format!("Unix socket {}", p.display())),
+            DaemonEndpoint::Tcp(a) => Some(format!("TCP {}", a)),
+        }
+    }
+
     /// Send the `auth` frame and verify the response.
     fn authenticate(&mut self, token: AuthToken) -> Result<(), String> {
         let req = Request {
@@ -505,4 +513,44 @@ pub fn check() -> Result<std::process::ExitCode, String> {
     }
 
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Implement the REPL's transport trait for the real client.
+///
+/// This is the only place the REPL talks to the daemon, so the trait
+/// implementation is the contract between the interactive loop and the
+/// wire protocol.
+impl crate::repl::Transport for Client {
+    fn execute(
+        &mut self,
+        params: crate::repl::ExecuteParams,
+    ) -> Result<crate::daemon::protocol::TaskOutcome, crate::repl::TransportError> {
+        // Convert the REPL's params to the wire protocol's params
+        let wire_params = ProtoExecuteParams {
+            task: params.task,
+            grants: params.grants,
+            timeout_secs: params.timeout_secs,
+        };
+        self.execute(wire_params)
+            .map_err(crate::repl::TransportError::Refused)
+    }
+
+    fn info(&mut self) -> Result<crate::daemon::protocol::Info, crate::repl::TransportError> {
+        self.info().map_err(crate::repl::TransportError::Refused)
+    }
+
+    fn reconnect(&mut self) -> Result<(), crate::repl::TransportError> {
+        // Rebuild the connection from scratch. A new socket has no memory of
+        // the old handshake, so we must re-authenticate on TCP.
+        let token = if matches!(self.endpoint, DaemonEndpoint::Tcp(_)) {
+            Some(crate::client::AuthToken::read().map_err(|e| {
+                crate::repl::TransportError::Refused(format!("could not read token: {e}"))
+            })?)
+        } else {
+            None
+        };
+        *self = Client::connect(self.endpoint.clone(), token)
+            .map_err(crate::repl::TransportError::Disconnected)?;
+        Ok(())
+    }
 }

@@ -36,7 +36,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use agentos_cli::{ask_on_stdin, Decision, client::{dispatch, check, ExecuteParams, Grants}, util::user_id};
+use agentos_cli::{ask_on_stdin, Decision, client::{dispatch, check, ExecuteParams, Grants, Client, discover_endpoint, DaemonEndpoint, AuthToken}, repl::{Repl, ReplExit}, util::user_id};
 use agentos_core::{ModelExtractor, Outcome, Planner, PlanOutcome, Session};
 use agentos_dsl::PlanError;
 use agentos_infer::{Ollama, RoleModels};
@@ -52,6 +52,7 @@ agentos - run a task with real privileges and a real policy engine
 
 USAGE:
   agentos run [OPTIONS] <TASK>
+  agentos repl [OPTIONS]
   agentos check
 
 OPTIONS:
@@ -63,6 +64,9 @@ OPTIONS:
 `check` reports what this machine can actually do. Run it first if something
 seems unavailable: a sandbox that did nothing and a sandbox that never started
 look identical from the outside.
+
+`repl` starts an interactive session with the daemon. Tasks are sent in your
+words; confirmations are a person or nothing. A piped stdin gets no approvals.
 ";
 
 fn main() -> std::process::ExitCode {
@@ -85,6 +89,7 @@ fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
 
     match command.as_str() {
         "run" => cmd_run(&args[1..]),
+        "repl" => cmd_repl(&args[1..]),
         "check" => cmd_check(),
         "help" | "--help" | "-h" => {
             print!("{USAGE}");
@@ -191,6 +196,84 @@ fn cmd_run(args: &[String]) -> Result<std::process::ExitCode, String> {
     // Fall back to local execution if daemon is not reachable
     eprintln!("agentos: daemon not reachable, falling back to local execution");
     cmd_run_local(args)
+}
+
+/// Parse options for the REPL (no task argument needed).
+#[derive(Default)]
+struct ReplOptions {
+    model: String,
+    allow_hosts: Vec<String>,
+    write_root: Option<PathBuf>,
+    fetch: bool,
+}
+
+fn parse_repl_options(args: &[String]) -> Result<ReplOptions, String> {
+    let mut o = ReplOptions {
+        model: "llama3.2:3b".to_string(),
+        fetch: true,
+        ..ReplOptions::default()
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        let mut value = || -> Result<String, String> {
+            i += 1;
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| format!("{arg} needs a value"))
+        };
+        match arg {
+            "--model" => o.model = value()?,
+            "--allow-host" => o.allow_hosts.push(value()?),
+            "--write-root" => o.write_root = Some(PathBuf::from(value()?)),
+            "--no-fetch" => o.fetch = false,
+            other if other.starts_with("--") => return Err(format!("unknown option `{other}`")),
+            other => return Err(format!("unexpected argument `{other}` (repl takes no task; type it at the prompt)")),
+        }
+        i += 1;
+    }
+    Ok(o)
+}
+
+fn cmd_repl(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let options = parse_repl_options(args)?;
+
+    // Build grants from options
+    let grants = Grants {
+        hosts: options.allow_hosts.clone(),
+        write_roots: options.write_root.as_ref().map(|p| p.to_string_lossy().to_string()).into_iter().collect(),
+        send_email: false,
+    };
+
+    // Connect to the daemon
+    let endpoint = discover_endpoint();
+    let token = if matches!(endpoint, DaemonEndpoint::Tcp(_)) {
+        Some(AuthToken::read()?)
+    } else {
+        None
+    };
+
+    let client = Client::connect(endpoint, token)?;
+
+    // Print the endpoint we're using
+    match client.endpoint_str() {
+        Some(s) => eprintln!("agentos: connected via {}", s),
+        None => eprintln!("agentos: connected"),
+    }
+
+    // Start the REPL
+    let mut repl = Repl::new(client, grants, agentos_cli::stdin_is_interactive());
+    let mut stdin = std::io::stdin().lock();
+    let mut stdout = std::io::stdout();
+
+    let exit_reason = repl
+        .run(&mut stdin, &mut stdout)
+        .map_err(|e| e.to_string())?;
+
+    match exit_reason {
+        ReplExit::Normal => Ok(std::process::ExitCode::SUCCESS),
+        ReplExit::Disconnected => Ok(std::process::ExitCode::from(6)),
+    }
 }
 
 /// One user, fixed.
