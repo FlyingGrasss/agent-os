@@ -54,10 +54,16 @@
 //! still plans and still runs plans that need no authority; it cannot write a file,
 //! reach a host, or send mail. A mistyped variable produces an inert daemon rather
 //! than an unrestricted one.
+//!
+//! The one place that rule is deliberately *not* "fall back to the default" is the
+//! ambient inbox's rate limit: a mistyped `AGENTOS_INBOX_PER_MINUTE` stops the
+//! inbox rather than quietly restoring a flood defence the operator believes they
+//! have tuned. See [`inbox_limits`].
 
 pub mod auth;
 pub mod executor;
 pub mod grants;
+pub mod inbox_limits;
 pub mod inbox_loop;
 pub mod listener;
 pub mod protocol;
@@ -210,12 +216,26 @@ async fn serve() -> Result<(), String> {
     // creating the directory whose contents it then trusts enough to act on, which
     // is a strange thing for a program to do on its own initiative.
     let inbox_handle = start_inbox(&state).await;
-    if inbox_handle.is_none() {
+    match inbox_handle {
+        // Held for the life of `serve`: dropping the handle would abort the
+        // watcher, so a daemon that stored it and then lost it would watch nothing.
+        InboxStartup::Started(handle) => {
+            let _watcher = handle;
+        }
         // Said out loud rather than left to be discovered. A user who drops a file
         // in the inbox and gets no response needs to know the feature is off, and
         // the most likely reason is that they never enabled it.
-        eprintln!("agentosd: ambient inbox monitoring: OFF (set AGENTOS_INBOX, or create {})",
-            inbox_loop::default_inbox_path().display());
+        InboxStartup::NotConfigured(path) => {
+            eprintln!(
+                "agentosd: ambient inbox monitoring: OFF (set AGENTOS_INBOX, or create {})",
+                path.display()
+            );
+        }
+        // The operator asked for it and it did not start. The reason is printed
+        // with the DISABLED label so nobody reads a stopped inbox as a quiet one.
+        InboxStartup::Refused(reason) => {
+            eprintln!("agentosd: ambient inbox monitoring: DISABLED -- {reason}");
+        }
     }
 
     let outcome = match listen {
@@ -268,6 +288,25 @@ async fn serve() -> Result<(), String> {
     outcome
 }
 
+/// How the ambient inbox came up, reported so a caller never has to infer it.
+enum InboxStartup {
+    /// Watching. The handle is owned here and must be kept alive by the caller.
+    Started(tokio::task::JoinHandle<()>),
+    /// Nobody asked for it: neither the variable nor the directory is present.
+    ///
+    /// Distinct from [`Self::Refused`] because the two have different remedies —
+    /// one needs an operator to enable a feature, the other needs one to fix a
+    /// mistake — and a daemon that reported both as "off" would send someone
+    /// looking in the wrong place.
+    NotConfigured(PathBuf),
+    /// It was asked for and refused, for a stated reason.
+    ///
+    /// A malformed rate limit lands here. So does a directory that is not there.
+    /// The point is that none of these is reported as though the feature were
+    /// merely absent.
+    Refused(String),
+}
+
 /// Start the ambient inbox watcher, if one is configured.
 ///
 /// Returns what happened so the daemon can report it rather than leaving a caller
@@ -282,7 +321,17 @@ async fn serve() -> Result<(), String> {
 /// it explicitly (`AGENTOS_INBOX`) or when the conventional path is already there,
 /// which is the same rule the daemon uses for everything else: the operator
 /// configures, the operator's configuration is the authority.
-async fn start_inbox(state: &Arc<DaemonState>) -> Option<tokio::task::JoinHandle<()>> {
+///
+/// # Why a bad rate limit stops the inbox rather than the daemon
+///
+/// `AGENTOS_INBOX_PER_MINUTE=twelve` is an operator who believes they have tuned
+/// something and have not. Continuing would mean waking up on the default rate
+/// under a configuration that reads as tuned, so the misconfiguration would be
+/// invisible until a flood arrived. Refusing to start the inbox says so at once,
+/// on stderr, and leaves the socket-serving half of the daemon untouched — the
+/// two features share a process but not an authority, and taking down IPC service
+/// over an inbox typo would be a worse outcome than the typo.
+async fn start_inbox(state: &Arc<DaemonState>) -> InboxStartup {
     let path = inbox_loop::default_inbox_path();
     let explicitly_set = std::env::var("AGENTOS_INBOX")
         .ok()
@@ -294,19 +343,46 @@ async fn start_inbox(state: &Arc<DaemonState>) -> Option<tokio::task::JoinHandle
             // The operator named a directory that is not there. That is a
             // configuration error worth saying out loud rather than silently
             // running without the feature the operator asked for.
-            eprintln!("agentosd: AGENTOS_INBOX is set to {} but that is not a directory", path.display());
-            eprintln!("         ambient inbox monitoring is DISABLED");
+            return InboxStartup::Refused(format!(
+                "AGENTOS_INBOX is set to {} but that is not a directory",
+                path.display()
+            ));
         }
-        return None;
+        return InboxStartup::NotConfigured(path);
     }
 
-    let inbox = match agentos_events::inbox::Inbox::open(&path) {
-        Ok(inbox) => inbox,
+    // Parsed only once the inbox is actually going to run, so the warning below
+    // is about a limiter that is in force rather than about one that was never
+    // built.
+    let limits = match inbox_limits::limits_from_env() {
+        Ok(limits) => limits,
         Err(e) => {
-            eprintln!("agentosd: cannot watch the inbox at {}: {e}", path.display());
-            return None;
+            let (per_minute, burst) = inbox_limits::default_pair();
+            return InboxStartup::Refused(format!(
+                "{e}\n         (the inbox is not started with a rate limit that was not \
+                 understood; unset {}/{} to use the defaults of {per_minute} per minute \
+                 and a burst of {burst})",
+                inbox_limits::ENV_PER_MINUTE,
+                inbox_limits::ENV_BURST,
+            ));
         }
     };
+
+    let inbox = match agentos_events::inbox::Inbox::with_limits(&path, limits) {
+        Ok(inbox) => inbox,
+        Err(e) => {
+            return InboxStartup::Refused(format!(
+                "cannot watch the inbox at {}: {e}",
+                path.display()
+            ));
+        }
+    };
+
+    // One line, once. The operator is allowed to loosen this; the daemon's job is
+    // to have said so in the log before the first flood rather than after it.
+    if let Some(warning) = inbox_limits::weakening_warning(&inbox.limits()) {
+        eprintln!("{warning}");
+    }
 
     // The watcher needs the same model as the IPC path, and `Backend::complete`
     // takes `&mut self`. Rather than a second backend (a second 2 GB model on a
@@ -323,7 +399,7 @@ async fn start_inbox(state: &Arc<DaemonState>) -> Option<tokio::task::JoinHandle
     eprintln!("         dropped .txt/.html/.json/.md files are summarized with NO grants");
     eprintln!("         anything needing approval halts at needs_human (this daemon cannot ask)");
 
-    Some(tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         // `watch` takes the shared backend handle and locks it only around each
         // run, so the model is free between payloads. See `watch` for why that
         // matters more than it looks.
@@ -333,7 +409,9 @@ async fn start_inbox(state: &Arc<DaemonState>) -> Option<tokio::task::JoinHandle
             // knowing who is listening.
         })
         .await;
-    }))
+    });
+
+    InboxStartup::Started(handle)
 }
 
 /// Build the operator's ceiling from the environment.

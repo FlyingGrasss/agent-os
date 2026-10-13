@@ -66,6 +66,14 @@ use crate::event::NameHash;
 /// and processed again on the next poll.
 pub const PROCESSED_DIR: &str = "processed";
 
+/// Subdirectory that rate-limited files are moved into.
+///
+/// A payload the limiter deferred is *not* dropped: it lands here and is picked up
+/// on a later poll once credit accumulates. The watcher reads this directory on
+/// every pass, ahead of anything newly dropped, so a flood drains in roughly the
+/// order it arrived rather than being overtaken by whatever showed up last.
+pub const DEFERRED_DIR: &str = "deferred";
+
 /// Extensions the watcher will act on.
 ///
 /// A closed list rather than "everything": a `.swp` file, a partial download, or a
@@ -99,6 +107,17 @@ pub enum SkipReason {
     StillBeingWritten,
     /// Larger than [`MAX_PAYLOAD_BYTES`].
     TooLarge,
+    /// These exact bytes were processed recently. Not an error: it is the flood
+    /// defence doing its job.
+    DuplicatePayload,
+    /// The rate limiter had no credit. The payload was moved to
+    /// [`DEFERRED_DIR`] and will be picked up later -- this is a *deferral*, not a
+    /// loss, and the name is deliberately not called `RateLimited` alone because
+    /// that would read like a refusal when nothing was refused.
+    RateLimited,
+    /// Could not be read this poll. The file may have been removed between the
+    /// directory listing and the read.
+    Unreadable,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -109,6 +128,9 @@ impl std::fmt::Display for SkipReason {
             SkipReason::NotRegularFile => "not a regular file",
             SkipReason::StillBeingWritten => "still being written",
             SkipReason::TooLarge => "larger than the payload limit",
+            SkipReason::DuplicatePayload => "these exact bytes were processed recently",
+            SkipReason::RateLimited => "deferred; the rate limiter had no credit",
+            SkipReason::Unreadable => "could not be read",
         };
         f.write_str(text)
     }
@@ -190,6 +212,9 @@ pub enum InboxError {
 
     #[error("cannot move the processed payload: {0}")]
     Archive(std::io::Error),
+
+    #[error("cannot defer the payload: {0}")]
+    Defer(std::io::Error),
 }
 
 /// One file the watcher decided to act on.
@@ -277,6 +302,44 @@ impl InboxEntry {
             .ok_or_else(|| InboxError::Archive(std::io::Error::other("path has no parent")))?;
         archive_into(parent, &self.path)
     }
+
+    /// Move this payload into `deferred/` and report where it went.
+    ///
+    /// Used by a caller that could not process this file *now* — because the rate
+    /// limiter said no — and wants to pick it up on a later pass rather than lose
+    /// it. A flood of files is deferred, never dropped: the user's payloads stay
+    /// on disk and are processed as the limiter lets credit accumulate. Returns
+    /// the new path so the caller can show it or re-queue it.
+    pub fn defer(&self) -> Result<PathBuf, InboxError> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| InboxError::Defer(std::io::Error::other("path has no parent")))?;
+        let deferred = parent.join(DEFERRED_DIR);
+        std::fs::create_dir_all(&deferred).map_err(InboxError::Defer)?;
+        let file_name = self
+            .path
+            .file_name()
+            .ok_or_else(|| InboxError::Defer(std::io::Error::other("path has no file name")))?;
+        let destination = deferred.join(file_name);
+        std::fs::rename(&self.path, &destination).map_err(InboxError::Defer)?;
+        Ok(destination)
+    }
+
+    /// The payload's digest, for flood detection and cross-drop correlation.
+    ///
+    /// Reading the bytes to compute a digest is a second read of the file when the
+    /// caller also wants [`Self::read_quarantined`]. That is a deliberate trade:
+    /// caching the bytes here would hold attacker-controlled text in memory for
+    /// longer than the quarantine model wants, and the digest has to be computed
+    /// *before* the rate-limit decision to skip duplicates without spending a
+    /// model call. A second bounded read is the smaller risk.
+    pub fn digest(&self) -> Result<crate::provenance::PayloadDigest, InboxError> {
+        let bytes = std::fs::read(&self.path).map_err(InboxError::Payload)?;
+        Ok(crate::provenance::PayloadDigest::of(
+            &bytes[..bytes.len().min(MAX_PAYLOAD_BYTES as usize)],
+        ))
+    }
 }
 
 /// Move `path` into `root/processed/`, disambiguating a name collision.
@@ -319,28 +382,51 @@ pub struct Skipped {
 
 /// A watched inbox directory.
 ///
-/// Owns the path and the "what have I already seen" state. Constructing one
-/// requires naming a directory, so a test cannot accidentally watch the real one.
+/// Owns the path, the "what have I already seen" state, the rate limiter, and the
+/// recent-digest window. Constructing one requires naming a directory, so a test
+/// cannot accidentally watch the real one.
 #[derive(Debug)]
 pub struct Inbox {
     root: PathBuf,
-    /// Last observed `(name hash, size)` per file, used to detect a file that is
-    /// still being written.
+    /// Last observed size per file, used to detect a file that is still being
+    /// written.
     ///
-    /// Keyed by the *file name*, not the hash: two files whose names hash
+    /// Keyed by full path rather than by the name hash: two files whose names hash
     /// identically are a collision this module cannot act on, and keying by hash
     /// would silently merge them. The map holds names internally and only exposes
     /// hashes.
     seen: BTreeMap<PathBuf, u64>,
+    /// Admission control.
+    ///
+    /// The point of this field is that a flood of files costs bounded model calls
+    /// rather than one call per file. Excess is *deferred*, never dropped: the
+    /// user's payloads stay on disk in [`DEFERRED_DIR`] and drain as credit
+    /// accumulates.
+    limiter: crate::ratelimit::TokenBucket,
+    /// Recently seen payload digests, for spotting the same file dropped
+    /// repeatedly. See [`crate::provenance::DigestWindow`].
+    digests: crate::provenance::DigestWindow,
 }
 
 impl Inbox {
-    /// Watch `root`, which must already exist.
+    /// Watch `root` with the default rate limit.
     ///
     /// Refuses a path that is not a directory rather than creating it. A watcher
     /// that made its own directory would be a watcher that would happily watch a
     /// path an attacker had chosen.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, InboxError> {
+        Self::with_limits(root, crate::ratelimit::Limits::default_for_inbox())
+    }
+
+    /// Watch `root` with an explicit rate limit.
+    ///
+    /// The limit is in units of *payloads*, so it is only as meaningful as the
+    /// work behind it. A caller who sets a very high limit has effectively turned
+    /// the flood defence off, and the log says so — see [`Self::limits`].
+    pub fn with_limits(
+        root: impl Into<PathBuf>,
+        limits: crate::ratelimit::Limits,
+    ) -> Result<Self, InboxError> {
         let root = root.into();
         let metadata = std::fs::metadata(&root).map_err(InboxError::Directory)?;
         if !metadata.is_dir() {
@@ -349,7 +435,24 @@ impl Inbox {
         Ok(Self {
             root,
             seen: BTreeMap::new(),
+            limiter: crate::ratelimit::TokenBucket::new(limits),
+            digests: crate::provenance::DigestWindow::default(),
         })
+    }
+
+    /// The rate limits in force.
+    pub fn limits(&self) -> crate::ratelimit::Limits {
+        self.limiter.limits()
+    }
+
+    /// Whether the flood defences are effectively disabled.
+    ///
+    /// Reported so a caller can say so at startup rather than discovering it later
+    /// as unexplained throughput. A per-second rate above one per *second* is not
+    /// plausible for a model-backed pipeline, so it almost certainly means the
+    /// limit was set wrong rather than tuned.
+    pub fn flood_defence_is_weak(&self) -> bool {
+        self.limiter.limits().per_second > 1.0
     }
 
     /// The watched directory.
@@ -375,6 +478,12 @@ impl Inbox {
         let mut skipped = Vec::new();
         let mut live: BTreeMap<PathBuf, u64> = BTreeMap::new();
 
+        // Deferred files are drained *first*, so a flood is processed in roughly
+        // the order it arrived rather than being perpetually overtaken by whatever
+        // was dropped most recently. This is what makes the deferred queue feel
+        // like a queue.
+        self.drain_deferred(&mut ready, &mut live);
+
         let entries =
             std::fs::read_dir(&self.root).map_err(InboxError::Directory)?;
 
@@ -388,9 +497,14 @@ impl Inbox {
 
             let path = entry.path();
 
-            // Never descend. `processed/` holds files this watcher already acted
-            // on, and re-processing them would loop.
-            if path.file_name().and_then(|n| n.to_str()) == Some(PROCESSED_DIR) {
+            // Never descend into the watcher's own directories. `processed/` holds
+            // files it already acted on and `deferred/` holds files it is holding
+            // for a later pass; treating either as new work would either loop or
+            // defeat the rate limit by re-reading the backlog every poll.
+            if matches!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some(PROCESSED_DIR) | Some(DEFERRED_DIR)
+            ) {
                 continue;
             }
 
@@ -445,18 +559,21 @@ impl Inbox {
                 continue;
             }
 
+            // The settle check happens *before* the rate limiter spends anything,
+            // so a half-written file costs no credit and a flood of in-progress
+            // writes cannot drain the bucket.
             match self.seen.get(&path) {
                 Some(previous) if *previous == size => {
-                    // Settled across two polls.
                     let mtime = metadata
                         .modified()
                         .ok()
                         .and_then(system_time_to_unix)
                         .unwrap_or(0);
-                    ready.push(InboxEntry {
+                    let entry = InboxEntry {
                         path: path.clone(),
                         event: InboxEvent { name: hash, size, mtime_unix: mtime },
-                    });
+                    };
+                    self.consider(&entry, &mut ready, &mut skipped);
                 }
                 _ => {
                     // First sighting, or the size moved. Record and wait.
@@ -470,6 +587,125 @@ impl Inbox {
 
         self.seen = live;
         Ok(Poll { ready, skipped })
+    }
+
+    /// Decide what to do with one settled entry: admit it, defer it, or note that
+    /// it is a duplicate.
+    ///
+    /// Order matters and is the whole defence:
+    ///
+    /// 1. **Digest first.** A file whose bytes were seen recently is recognised
+    ///    and skipped *without spending a token*. Ten thousand copies of one file
+    ///    cost zero model calls rather than one per copy, so the rate limit does
+    ///    not even have to absorb them.
+    /// 2. **Then the limiter.** A genuinely new payload spends one token or is
+    ///    deferred.
+    ///
+    /// Dedup before rate limiting is what makes the flood defence cheap. The
+    /// reverse order would spend tokens discovering that ten thousand files are
+    /// the same file.
+    fn consider(
+        &mut self,
+        entry: &InboxEntry,
+        ready: &mut Vec<InboxEntry>,
+        skipped: &mut Vec<Skipped>,
+    ) {
+        // `digest` reads the file, which the caller may then read again for the
+        // payload. That double read is a deliberate trade, documented on
+        // `InboxEntry::digest`.
+        match entry.digest() {
+            Ok(digest) => {
+                if self.digests.record(digest) {
+                    skipped.push(Skipped {
+                        name: entry.event().name,
+                        reason: SkipReason::DuplicatePayload,
+                    });
+                    return;
+                }
+            }
+            Err(_) => {
+                // Unreadable here means unreadable later. Reporting it as
+                // not-a-regular-file would be a lie; the honest report is that
+                // this poll could not act on it.
+                skipped.push(Skipped {
+                    name: entry.event().name,
+                    reason: SkipReason::Unreadable,
+                });
+                return;
+            }
+        }
+
+        if self.limiter.take() {
+            ready.push(entry.clone());
+        } else if entry.defer().is_ok() {
+            // Deferred, not dropped. The payload is on disk in `deferred/` and
+            // `drain_deferred` will pick it up once credit accumulates.
+        } else {
+            // Could not move it aside, so it stays in the inbox and will be
+            // reconsidered next poll rather than being lost.
+            skipped.push(Skipped {
+                name: entry.event().name,
+                reason: SkipReason::RateLimited,
+            });
+        }
+    }
+
+    /// Move deferred files back into the ready set as credit allows.
+    ///
+    /// Best-effort by design. A file that cannot be moved back is left where it is
+    /// and retried on the next poll; the alternative — reporting an error and
+    /// abandoning the whole backlog — would mean one stuck file stops the queue.
+    fn drain_deferred(&mut self, ready: &mut Vec<InboxEntry>, live: &mut BTreeMap<PathBuf, u64>) {
+        let deferred_dir = self.root.join(DEFERRED_DIR);
+        let Ok(entries) = std::fs::read_dir(&deferred_dir) else {
+            // No backlog yet. The overwhelmingly common case, and not an error.
+            return;
+        };
+
+        for entry in entries.flatten() {
+            // Stop as soon as the bucket is empty. Continuing would re-admit
+            // nothing but would still stat every remaining file, so the flood would
+            // cost a directory walk on every poll forever.
+            if !self.limiter.take() {
+                return;
+            }
+
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if file_name.starts_with('.') {
+                continue;
+            }
+
+            let destination = self.root.join(file_name);
+            if std::fs::rename(&path, &destination).is_err() {
+                continue;
+            }
+
+            let Ok(metadata) = std::fs::symlink_metadata(&destination) else {
+                continue;
+            };
+            let size = metadata.len();
+            live.insert(destination.clone(), size);
+
+            let hash = hash_name(file_name.as_bytes());
+            let mtime = metadata
+                .modified()
+                .ok()
+                .and_then(system_time_to_unix)
+                .unwrap_or(0);
+            let entry = InboxEntry {
+                path: destination,
+                event: InboxEvent { name: hash, size, mtime_unix: mtime },
+            };
+
+            // A deferred file was already admitted once, so its digest is already
+            // in the window and `consider` would call it a duplicate and skip it.
+            // Push it straight to ready instead — the token has been spent and the
+            // work was already decided.
+            ready.push(entry);
+        }
     }
 }
 
@@ -494,3 +730,20 @@ fn system_time_to_unix(time: SystemTime) -> Option<u64> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod flood_tests;
+
+impl Inbox {
+    /// How many files the settle check is tracking. Test-only.
+    #[cfg(test)]
+    pub(crate) fn seen_len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// How many digests the flood window is holding. Test-only.
+    #[cfg(test)]
+    pub(crate) fn digest_window_len(&self) -> usize {
+        self.digests.len()
+    }
+}

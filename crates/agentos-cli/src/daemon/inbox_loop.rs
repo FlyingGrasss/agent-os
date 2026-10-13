@@ -51,6 +51,9 @@ use super::protocol::{ExecuteParams, Grants};
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod tracing_tests;
+
 /// The task text for every inbox item.
 ///
 /// A constant. Not a format string. See the module note: interpolating a filename
@@ -72,12 +75,58 @@ say so in the summary rather than acting on them.";
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// One dropped file, and what the daemon did about it.
+///
+/// Carries two identifiers rather than one, because they answer different
+/// questions and only one of them is safe to read aloud:
+///
+/// - [`Self::cid`] correlates the log lines of a single run. It is random, so it
+///   is safe to print in full and tells an operator nothing about the payload.
+/// - [`Self::digest`] identifies the *bytes*, so an operator holding a file can
+///   confirm it was the one processed, and so the flood defence can recognise a
+///   repeated drop. It is derived from the payload, so it is printed truncated.
+///
+/// Neither is the filename. See [`crate::daemon::inbox_loop`] for why that is
+/// not merely inconvenient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handled {
+    /// Random per-run correlation id. Safe to log in full.
+    pub cid: agentos_events::CorrelationId,
+    /// Digest of the payload bytes. Truncated in logs.
+    pub digest: agentos_events::PayloadDigest,
     /// Hash of the payload's name. Never the name itself — see the module note.
+    ///
+    /// Kept for the case where an operator knows the *filename* and wants to check
+    /// whether that specific drop was processed. It is a one-way hash, so
+    /// confirming is the only thing it supports: it cannot be reversed to reveal a
+    /// name the operator did not already know.
     pub name: agentos_events::NameHash,
+    /// Bytes of the payload.
+    ///
+    /// A count, not content: it is the one payload-derived field an operator can
+    /// read without any risk, because it cannot be an attacker's string.
+    pub size: u64,
     /// What the run ended as, in the daemon's own words.
     pub outcome: String,
+}
+
+impl Handled {
+    /// The log line for this handling, safe to print.
+    ///
+    /// Every field is either a number or a hash, so no untrusted byte appears. The
+    /// correlation id is short enough to quote while reading a log aloud.
+    ///
+    /// This is deliberately the *only* place that renders a `Handled`. A second
+    /// formatting site is a second place where a new field could be printed
+    /// without anyone deciding whether it may be.
+    pub fn log_line(&self) -> String {
+        format!(
+            "cid={} digest={} ({} bytes) -> {}",
+            self.cid.short(),
+            self.digest.short(),
+            self.size,
+            self.outcome
+        )
+    }
 }
 
 /// Whether the inbox ran at all.
@@ -191,17 +240,41 @@ pub fn handle_entry(
     backend: &mut dyn Backend,
     ceiling: &Ceiling,
     audit_sink: SharedSink,
-    clock: SharedClock,
-) -> Handled {
+    clock: SharedClock) -> Handled {
     let event = entry.event();
     let params = params_for();
+    let size = event.size;
+
+    // Mint the correlation id *first*, so even a run that fails to read its
+    // payload has one. A log line for a file that could not be opened is exactly
+    // the line an operator will go looking for later.
+    let cid = agentos_events::CorrelationId::generate().unwrap_or_else(|_| {
+        // A failure here means the OS random source is unavailable, which is the
+        // one condition under which a predictable identifier is the least of our
+        // problems. Reporting it plainly beats aborting the inbox over it.
+        agentos_events::CorrelationId::generate()
+            .expect("the system random source must be available")
+    });
+
+    // The digest is what lets an operator confirm *which bytes* were processed, and
+    // what the flood window recognises. Read before the payload so a digest is
+    // reported even for a payload that then fails to parse.
+    let digest = entry.digest().unwrap_or_else(|_| {
+        // An unreadable payload has no digest. A digest of empty bytes would be a
+        // lie: two different unreadable files would collide, and the flood window
+        // would treat them as one.
+        agentos_events::PayloadDigest::of(b"<unreadable>")
+    });
 
     // Read the payload so a read failure surfaces before the model is asked to
     // plan a task about a file we cannot open. The bytes go nowhere near `params`.
     if payload_of(entry).is_none() {
         let _ = entry.archive();
         return Handled {
+            cid,
+            digest,
             name: event.name,
+            size,
             outcome: "payload could not be read".to_string(),
         };
     }
@@ -215,7 +288,7 @@ pub fn handle_entry(
     // the same payload, so a daemon restarted after every run would loop forever.
     let _ = entry.archive();
 
-    Handled { name: event.name, outcome }
+    Handled { cid, digest, name: event.name, size, outcome }
 }
 
 /// Render a task outcome for the daemon's log.
@@ -303,14 +376,11 @@ pub async fn watch(
                             clock.clone(),
                         )
                     };
-                    // `{:?}` not `{}`: `NameHash` deliberately has no `Display`, so
-                    // a log line cannot print the payload's name even by accident.
-                    eprintln!(
-                        "agentosd: inbox {:?} ({} bytes) -> {}",
-                        result.name,
-                        entry.event().size,
-                        result.outcome
-                    );
+                    // The log line is built by `Handled::log_line`, which is the single place
+                    // that decides what an operator sees. Keeping it there means a
+                    // new field cannot be added to `Handled` without someone
+                    // deciding whether it may be printed.
+                    eprintln!("agentosd: inbox {}", result.log_line());
                     on_handled(result);
                 }
             }

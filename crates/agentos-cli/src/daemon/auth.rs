@@ -12,6 +12,13 @@
 //! written to a file only the owning user can read. A client reads the file and
 //! presents the token as the first frame of every connection.
 //!
+//! The entropy itself is [`agentos_events::random`], not this module. A security
+//! control with two implementations is a control where one of them has not been
+//! reviewed, and the same bytes are also needed for inbox correlation ids and
+//! flood-detection file identities, so there is one implementation and this module
+//! asks for it. What stays here is the part that is about authority rather than
+//! entropy: how the bytes are stored, compared, and disclosed.
+//!
 //! # What this does and does not defend against
 //!
 //! **It defends against other local users.** The token file is `0600` in a `0700`
@@ -78,9 +85,17 @@ pub struct Token([u8; TOKEN_BYTES]);
 
 impl Token {
     /// Draw a fresh token from the operating system's CSPRNG.
+    ///
+    /// 32 bytes, no more and no fewer — see [`TOKEN_BYTES`]. There is no fallback
+    /// path here: if the kernel will not produce bytes, the daemon does not start.
+    /// A weaker generator would produce a token that looks fine to every check
+    /// downstream and is guessable, which is the worst shape a failure can take.
     pub fn generate() -> Result<Self, AuthError> {
         let mut bytes = [0u8; TOKEN_BYTES];
-        os_random::fill(&mut bytes)?;
+        // The shared module is the single implementation of this on purpose; see
+        // its note on why a second copy would be a defect.
+        agentos_events::random::fill(&mut bytes)
+            .map_err(|e| AuthError::RandomUnavailable(e.to_string()))?;
         Ok(Token(bytes))
     }
 
@@ -174,6 +189,11 @@ pub enum AuthError {
     /// to start rather than falling back to a weaker source — a fallback here
     /// would be a silent downgrade of the only thing standing between a local
     /// user and the daemon's authority.
+    ///
+    /// Raised by [`Token::generate`] when [`agentos_events::random::fill`] reports
+    /// a failure; the string is the underlying `io::Error`'s own message, so the
+    /// variant carries the platform's diagnosis without this module having to
+    /// re-derive or second-guess it.
     #[error("could not read the system random source: {0}")]
     RandomUnavailable(String),
 
@@ -411,93 +431,6 @@ fn ensure_private_dir(dir: &Path) -> Result<(), AuthError> {
         path: dir.display().to_string(),
         reason: format!("could not create the state directory: {e}"),
     })
-}
-
-/// The operating system's CSPRNG.
-///
-/// Both platforms hand this to the kernel rather than implementing one. A
-/// userspace CSPRNG seeded from a clock would be a rewrite of a solved problem
-/// with a much worse failure mode, and the point of this crate is that the
-/// interesting parts are the policy decisions, not the entropy.
-mod os_random {
-    /// Unix: read `/dev/urandom`.
-    ///
-    /// `getrandom(2)` would be tidier, but it needs an `libc` binding and this
-    /// crate has none. `/dev/urandom` is the same kernel pool; the only
-    /// difference is that it is a file and so can block, which for 32 bytes is not
-    /// a concern on any platform this daemon runs on.
-    #[cfg(unix)]
-    pub fn fill(buf: &mut [u8]) -> Result<(), super::AuthError> {
-        use std::io::Read;
-        let mut file = std::fs::File::open("/dev/urandom").map_err(|e| {
-            super::AuthError::RandomUnavailable(format!("could not open /dev/urandom: {e}"))
-        })?;
-        file.read_exact(buf).map_err(|e| {
-            super::AuthError::RandomUnavailable(format!("could not read /dev/urandom: {e}"))
-        })
-    }
-
-    /// Windows: `BCryptGenRandom` with the system-preferred RNG.
-    ///
-    /// Declared here rather than pulled from a crate, because this file's whole
-    /// claim is that securing the daemon needs no new dependency. Passing a null
-    /// algorithm handle is the documented way to ask for the system-preferred
-    /// provider, which is what a token wants — it avoids `BCRYPT_RNG_ALGORITHM`
-    /// being unavailable on some builds.
-    ///
-    /// `BCRYPT_USE_SYSTEM_PREFERRED_RNG` is 0x00000002 and `STATUS_SUCCESS` is 0.
-    #[cfg(windows)]
-    pub fn fill(buf: &mut [u8]) -> Result<(), super::AuthError> {
-        use core::ffi::c_void;
-
-        #[link(name = "bcrypt")]
-        extern "system" {
-            fn BCryptGenRandom(
-                algorithm: *mut c_void,
-                buffer: *mut u8,
-                buffer_length: u32,
-                flags: u32,
-            ) -> i32;
-        }
-
-        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
-        const STATUS_SUCCESS: i32 = 0;
-
-        // BCryptGenRandom takes a u32 length. The buffer is a fixed 32 bytes, so
-        // the cast cannot truncate; the assertion documents that rather than
-        // leaving a reader to work it out.
-        assert!(buf.len() <= u32::MAX as usize, "token buffer exceeds the u32 length BCryptGenRandom takes");
-
-        // SAFETY: `buf` is a valid, uniquely borrowed slice of exactly
-        // `buf.len()` writable bytes for the duration of the call, and a null
-        // algorithm handle is the documented way to request the system-preferred
-        // RNG. The kernel writes at most `buf.len()` bytes.
-        let status = unsafe {
-            BCryptGenRandom(
-                core::ptr::null_mut(),
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            )
-        };
-
-        if status == STATUS_SUCCESS {
-            Ok(())
-        } else {
-            Err(super::AuthError::RandomUnavailable(format!(
-                "BCryptGenRandom failed with status 0x{:08x}",
-                status as u32
-            )))
-        }
-    }
-
-    /// Any other platform has no source here, and the daemon must not guess one.
-    #[cfg(not(any(unix, windows)))]
-    pub fn fill(_buf: &mut [u8]) -> Result<(), super::AuthError> {
-        Err(super::AuthError::RandomUnavailable(
-            "no system random source is wired up for this platform".into(),
-        ))
-    }
 }
 
 /// The parameters of an `auth` call.
