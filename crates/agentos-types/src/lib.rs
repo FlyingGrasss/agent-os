@@ -11,6 +11,7 @@ mod provenance;
 mod value;
 
 pub use capability::{Cap, CapId, CapKind, CapRegistry, CapabilityError};
+pub use digest::{digests_equal, sha256, Sha256};
 pub use event::{Event, EventId};
 pub use provenance::{Label, SourceId, SourceKind};
 pub use value::{

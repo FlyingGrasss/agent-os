@@ -61,6 +61,20 @@
 //! alone. A reader seeing an attempt with no outcome learns that the call was
 //! made and did not report back, which is the fact the old log could not tell
 //! them.
+//!
+//! # Append-only is not tamper-evidence
+//!
+//! The [`AuditSink`] contract — never rewrite what you appended, which
+//! [`FileSink`] honours — is a promise about *this process's* behaviour. It says
+//! nothing about whoever can open the file with an editor afterwards, and
+//! "append-only" describes an API rather than a filesystem. Deleting the one
+//! line recording a tool call leaves a log that still looks entirely ordinary:
+//! sequence numbers still ascend and nothing is out of order.
+//!
+//! Every line is therefore hash-chained to its predecessor, so an edit, deletion,
+//! reordering, or partial write breaks the links after it. See [`crate::chain`]
+//! for the format, the verifier, and — importantly — what a keyless chain cannot
+//! prove on its own.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
@@ -70,6 +84,8 @@ use std::sync::{Arc, Mutex};
 
 use agentos_types::{Label, SourceId, SourceKind, Val};
 use serde::Serialize;
+
+use crate::chain::{self, Chain};
 
 /// Longest prefix of a *trusted* text argument kept in a record, in bytes.
 pub const MAX_TRUSTED_PREFIX: usize = 64;
@@ -533,6 +549,7 @@ pub trait AuditSink: Send {
 #[derive(Debug, Clone, Default)]
 pub struct MemorySink {
     lines: Arc<Mutex<Vec<String>>>,
+    chain: Chain,
 }
 
 /// A read-only view of a [`MemorySink`].
@@ -576,7 +593,8 @@ impl MemoryReader {
 
 impl AuditSink for MemorySink {
     fn append(&mut self, record: &AuditRecord) -> Result<(), AuditError> {
-        let line = serde_json::to_string(record)?;
+        let body = serde_json::to_string(record)?;
+        let line = self.chain.seal(&body);
         self.lines
             .lock()
             .expect("memory sink poisoned")
@@ -585,33 +603,58 @@ impl AuditSink for MemorySink {
     }
 }
 
-/// Newline-delimited JSON on disk.
+/// Newline-delimited JSON on disk, each line chained to the one before it.
 ///
 /// Opened once, in append mode, at construction. The file is never reopened per
 /// record and never truncated, so what is already in it stays in it. Each append
 /// is flushed and `sync_data`'d: the point of I6 is that an intent survives the
 /// process it was recorded in, and bytes sitting in an OS buffer do not survive
 /// a power cut.
+///
+/// Opening an existing log recovers the chain head from its last line. Resuming
+/// from genesis instead would make the reopened log fail verification, and
+/// ignoring the existing history would let a tampered tail be laundered by a
+/// restart.
 #[derive(Debug)]
 pub struct FileSink {
     file: std::fs::File,
+    chain: Chain,
 }
 
 impl FileSink {
+    /// Open for appending, resuming the chain from whatever is already there.
+    ///
+    /// Fails if the existing log does not verify. Refusing to append is
+    /// deliberate: a chain that continues from a broken link is worse than one
+    /// that stopped, because every subsequent record inherits the break and the
+    /// damage stops being visible.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuditError> {
+        let path = path.as_ref();
+        let head = match std::fs::read_to_string(path) {
+            Ok(existing) => chain::head_of_existing(&existing).map_err(|fault| {
+                AuditError::Build(format!("refusing to append to a broken audit log: {fault}"))
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => chain::genesis(),
+            Err(e) => return Err(e.into()),
+        };
+
         let file = OpenOptions::new()
             .append(true)
             .create(true)
-            .open(path.as_ref())?;
-        Ok(Self { file })
+            .open(path)?;
+        Ok(Self {
+            file,
+            chain: Chain::resume(head),
+        })
     }
 }
 
 impl AuditSink for FileSink {
     fn append(&mut self, record: &AuditRecord) -> Result<(), AuditError> {
-        let mut line = serde_json::to_string(record)?;
-        line.push('\n');
+        let body = serde_json::to_string(record)?;
+        let line = self.chain.seal(&body);
         self.file.write_all(line.as_bytes())?;
+        self.file.write_all(b"\n")?;
         self.file.flush()?;
         self.file.sync_data()?;
         Ok(())
@@ -849,9 +892,13 @@ mod tests {
     }
 
     fn json_of(line: &str) -> serde_json::Value {
+        // Lines are `<prev> <hash>\t<json>`; these assertions are about the record
+        // body, so drop the chain envelope. See `crate::chain` for why the chain
+        // wraps the record instead of being fields inside it.
+        let body = line.split_once('\t').map_or(line, |(_, body)| body);
         // Round-tripped through a serialization first, so a record that cannot
         // be written at all fails here rather than in an assertion below.
-        let reencoded = serde_json::to_string(&serde_json::from_str::<serde_json::Value>(line)
+        let reencoded = serde_json::to_string(&serde_json::from_str::<serde_json::Value>(body)
             .expect("log lines are valid JSON"))
         .expect("a parsed line re-encodes");
         serde_json::from_str(&reencoded).expect("log lines are valid JSON")

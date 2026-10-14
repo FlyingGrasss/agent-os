@@ -22,7 +22,7 @@ Ordered by what an attacker actually wants.
 | **Tool authority** | `PolicyHost`, capability handles | Sending mail, reading files, running commands. The asset is the *authority*, not the data. |
 | **User credentials** | `~/.ssh`, browser session, password manager | Theft is usually the goal of an injection. |
 | **Provenance labels** | Every `Val<T>` | If a label can be forged, every other defence silently stops applying. |
-| **The audit log** | Append-only sink | If it can be rewritten, there is no evidence and no detection. |
+| **The audit log** | Append-only sink, hash-chained | If it can be rewritten, there is no evidence and no detection. The chain (`agentos-tools::chain`) detects edits, deletions, reordering and partial writes; it is keyless, so it does not detect an attacker who recomputes the whole file. See the residual-risk note below. |
 | **The user's attention** | Confirmation prompts | An attacker who can spam meaningless confirmations trains the user to click yes. |
 
 The fourth is the one that is easy to overlook. The whole design is a taint

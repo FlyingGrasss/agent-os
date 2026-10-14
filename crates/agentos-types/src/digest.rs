@@ -26,7 +26,7 @@ const H0: [u32; 8] = [
 /// Incremental SHA-256, so a confirmation digest can be assembled from several
 /// domain-separated parts without allocating a single concatenated buffer.
 #[derive(Clone)]
-pub(crate) struct Sha256 {
+pub struct Sha256 {
     state: [u32; 8],
     block: [u8; 64],
     block_len: usize,
@@ -34,7 +34,7 @@ pub(crate) struct Sha256 {
 }
 
 impl Sha256 {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             state: H0,
             block: [0u8; 64],
@@ -43,7 +43,7 @@ impl Sha256 {
         }
     }
 
-    pub(crate) fn update(&mut self, mut data: &[u8]) {
+    pub fn update(&mut self, mut data: &[u8]) {
         self.total_len = self.total_len.wrapping_add(data.len() as u64);
         while !data.is_empty() {
             let take = (64 - self.block_len).min(data.len());
@@ -58,7 +58,7 @@ impl Sha256 {
         }
     }
 
-    pub(crate) fn finish(mut self) -> [u8; 32] {
+    pub fn finish(mut self) -> [u8; 32] {
         let bit_len = self.total_len.wrapping_mul(8);
         self.update_no_count(&[0x80]);
         while self.block_len != 56 {
@@ -140,16 +140,21 @@ impl Sha256 {
 }
 
 /// One-shot convenience wrapper.
-#[cfg(test)]
-pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
+pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(data);
     h.finish()
 }
 
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Compare two digests without an early exit, so a mismatch does not leak how
 /// many leading bytes matched.
-pub(crate) fn digests_equal(a: &[u8; 32], b: &[u8; 32]) -> bool {
+pub fn digests_equal(a: &[u8; 32], b: &[u8; 32]) -> bool {
     let mut diff = 0u8;
     for i in 0..32 {
         diff |= a[i] ^ b[i];

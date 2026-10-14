@@ -55,6 +55,7 @@ USAGE:
   agentos repl [OPTIONS]
   agentos check
   agentos service <SUBCOMMAND>
+  agentos audit <SUBCOMMAND>
 
 OPTIONS:
   --model <NAME>          Ollama model for the planner (default llama3.2:3b)
@@ -79,6 +80,15 @@ words; confirmations are a person or nothing. A piped stdin gets no approvals.
   agentos service logs [-f]                              Show service logs (follow with -f)
   agentos service enable                                 Enable service at boot
   agentos service disable                                Disable service at boot
+
+`audit` inspects the append-only log (I6):
+  agentos audit verify [--path PATH]   Recompute the hash chain and report
+                                      whether the ledger is intact. Defaults to
+                                      $AGENTOSD_AUDIT_LOG, else ./agentosd-audit.log
+
+The chain is keyless: it detects an edited, deleted, reordered, or partially
+written record, but not an attacker who recomputes the whole file. Pin the head
+it prints somewhere they cannot write to make that detectable too.
 ";
 
 fn main() -> std::process::ExitCode {
@@ -104,6 +114,7 @@ fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
         "repl" => cmd_repl(&args[1..]),
         "check" => cmd_check(),
         "service" => cmd_service(&args[1..]),
+        "audit" => cmd_audit(&args[1..]),
         "help" | "--help" | "-h" => {
             print!("{USAGE}");
             Ok(std::process::ExitCode::SUCCESS)
@@ -720,4 +731,69 @@ fn find_install_script() -> Result<std::path::PathBuf, String> {
     }
 
     Err("install.sh not found. Run from workspace root or install agentos-cli from source.".into())
+}
+
+// ---------------------------------------------------------------------------
+// audit
+// ---------------------------------------------------------------------------
+
+/// Dispatch `agentos audit <sub>`.
+fn cmd_audit(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let Some(sub) = args.first() else {
+        eprintln!("usage: agentos audit verify [--path PATH]");
+        eprintln!("  verify   recompute the hash chain and report integrity");
+        return Ok(std::process::ExitCode::from(2));
+    };
+    match sub.as_str() {
+        "verify" => cmd_audit_verify(&args[1..]),
+        other => Err(format!("unknown audit subcommand `{other}`")),
+    }
+}
+
+/// Verify the audit ledger and report whether it is intact.
+///
+/// Exits non-zero on a fault so this is usable from a cron job or a deploy hook,
+/// which is the point: a check nobody can fail is not a check.
+///
+/// Prints the chain head on success. That head is the only thing worth keeping
+/// from a verification — pinning it somewhere the log's author cannot reach is
+/// what turns "the file is self-consistent" into "the file is still the one I
+/// checked", because the chain alone cannot tell the two apart.
+fn cmd_audit_verify(args: &[String]) -> Result<std::process::ExitCode, String> {
+    let mut path: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--path" => {
+                i += 1;
+                path = Some(args.get(i).ok_or("--path needs a value")?.clone());
+            }
+            other => return Err(format!("unknown audit verify option `{other}`")),
+        }
+        i += 1;
+    }
+
+    // Same resolution the daemon uses to decide where it writes, so `verify`
+    // defaults to the log this install is actually producing.
+    let path = path.unwrap_or_else(|| {
+        std::env::var("AGENTOSD_AUDIT_LOG").unwrap_or_else(|_| "agentosd-audit.log".to_string())
+    });
+
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read audit log `{path}`: {e}"))?;
+
+    match agentos_tools::chain::verify(&text) {
+        Ok(v) => {
+            println!("ok      {} records chained, log is intact", v.records);
+            println!("head    {}", v.head_hex());
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+        Err(fault) => {
+            eprintln!("COMPROMISED  {fault}");
+            eprintln!(
+                "head    not established; the chain is broken at the line above"
+            );
+            Ok(std::process::ExitCode::from(1))
+        }
+    }
 }

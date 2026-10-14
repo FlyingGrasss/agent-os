@@ -12,6 +12,7 @@
 //! attacker's instructions. See the [`audit`] module docs for the exact policy.
 
 pub mod audit;
+pub mod chain;
 pub mod fswrite;
 pub mod http;
 pub mod mail;
