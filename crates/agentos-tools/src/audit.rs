@@ -659,6 +659,18 @@ impl FileIdentity {
         self.size
     }
 
+    /// Whether two observations name the same file, ignoring size.
+    ///
+    /// [`FileIdentity`] deliberately carries size as well, because a log that
+    /// shrank under an unchanged inode is the `copytruncate` case and has to be
+    /// caught. But that makes it the wrong tool for the question "was this file
+    /// replaced?", where size is expected to differ — it grows on every append.
+    /// An observer comparing two samples a run apart wants the file's identity
+    /// and nothing else.
+    pub fn same_file(&self, other: &Self) -> bool {
+        self.device == other.device && self.inode == other.inode
+    }
+
     fn of_metadata(meta: &std::fs::Metadata) -> std::io::Result<Self> {
         #[cfg(unix)]
         let (device, inode) = {

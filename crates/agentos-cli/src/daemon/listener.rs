@@ -80,7 +80,13 @@ pub(crate) fn decode_frame(src: &mut BytesMut) -> Result<Option<Bytes>, io::Erro
 }
 
 /// Frame a payload for the wire.
-fn encode_frame(payload: &[u8]) -> Result<BytesMut, io::Error> {
+///
+/// `pub` so the throughput benchmark measures *this* function rather than a
+/// copy of it. A benchmark of a re-implementation reports the re-implementation's
+/// cost, which is the most common way a benchmark ends up lying: the copy
+/// diverges, the number stays on the wall, and nothing notices. This is a pure
+/// function with no invariants attached, so widening its visibility costs nothing.
+pub fn encode_frame(payload: &[u8]) -> Result<BytesMut, io::Error> {
     if payload.len() > MAX_FRAME_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
