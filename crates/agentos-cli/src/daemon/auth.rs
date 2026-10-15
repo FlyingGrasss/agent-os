@@ -264,11 +264,21 @@ impl TokenFile {
     /// machine without `XDG_STATE_HOME` would be an odd thing to ship. The final
     /// fallback is a dotfile in the home directory, which is user-owned and, on a
     /// correctly configured system, not world-readable.
+    ///
+    /// Accepts either `AGENTOS_TOKEN_FILE` or `AGENTOSD_TOKEN_FILE`. The client
+    /// reads the same two names, so setting one is enough for both halves; the
+    /// two spellings existing at all is a scar from when they disagreed.
     pub fn default_path() -> PathBuf {
-        if let Ok(explicit) = std::env::var("AGENTOSD_TOKEN_FILE") {
-            let trimmed = explicit.trim();
-            if !trimmed.is_empty() {
-                return PathBuf::from(trimmed);
+        match crate::env::resolve(crate::env::TOKEN_PATH) {
+            Ok(Some((_, explicit))) => return PathBuf::from(explicit),
+            Ok(None) => {}
+            // A disagreement cannot be honoured by a function with no error
+            // channel. Refusing to start is the right failure: the alternative is
+            // writing the token somewhere the client will not read it, which
+            // looks exactly like a missing token.
+            Err(conflict) => {
+                eprintln!("agentosd: {conflict}");
+                std::process::exit(70);
             }
         }
 

@@ -85,10 +85,25 @@ words; confirmations are a person or nothing. A piped stdin gets no approvals.
   agentos audit verify [--path PATH]   Recompute the hash chain and report
                                       whether the ledger is intact. Defaults to
                                       $AGENTOSD_AUDIT_LOG, else ./agentosd-audit.log
+  agentos audit verify --pin <HEAD>    Also require the final chain head to equal
+                                      <HEAD> (64 hex chars, as printed by a
+                                      previous run). Catches tail truncation and
+                                      log rollover, which a chain alone cannot see.
+
+  exit 0  intact, and the pin matched if one was given
+  exit 1  the chain is broken: a record was edited, deleted or reordered
+  exit 2  the chain is intact but the head is not the one pinned
+  exit 3  usage error, including a malformed --pin
 
 The chain is keyless: it detects an edited, deleted, reordered, or partially
-written record, but not an attacker who recomputes the whole file. Pin the head
-it prints somewhere they cannot write to make that detectable too.
+written record, but not an attacker who recomputes the whole file, and not a
+truncation of the tail. Pinning the head somewhere the log's author cannot
+write is what closes that last gap.
+
+The daemon and the client read the SAME variables. AGENTOS_TCP_ADDR and
+AGENTOSD_TCP_ADDR are aliases, as are AGENTOS_SOCKET/AGENTOSD_SOCKET and
+AGENTOS_TOKEN_FILE/AGENTOSD_TOKEN_FILE. Setting both to different values is
+refused rather than guessed at.
 ";
 
 fn main() -> std::process::ExitCode {
@@ -761,6 +776,7 @@ fn cmd_audit(args: &[String]) -> Result<std::process::ExitCode, String> {
 /// checked", because the chain alone cannot tell the two apart.
 fn cmd_audit_verify(args: &[String]) -> Result<std::process::ExitCode, String> {
     let mut path: Option<String> = None;
+    let mut pin: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -768,9 +784,22 @@ fn cmd_audit_verify(args: &[String]) -> Result<std::process::ExitCode, String> {
                 i += 1;
                 path = Some(args.get(i).ok_or("--path needs a value")?.clone());
             }
+            "--pin" => {
+                i += 1;
+                pin = Some(args.get(i).ok_or("--pin needs a value")?.clone());
+            }
             other => return Err(format!("unknown audit verify option `{other}`")),
         }
         i += 1;
+    }
+
+    // A malformed pin is checked before the log is even opened. Reading a log and
+    // then failing on the pin would report a compromised ledger for what is really
+    // a typo in a flag, and exit 2 means "the head moved" specifically.
+    if let Some(raw) = pin.as_deref() {
+        if validate_pin(raw).is_err() {
+            return Ok(std::process::ExitCode::from(3));
+        }
     }
 
     // Same resolution the daemon uses to decide where it writes, so `verify`
@@ -783,17 +812,62 @@ fn cmd_audit_verify(args: &[String]) -> Result<std::process::ExitCode, String> {
         .map_err(|e| format!("cannot read audit log `{path}`: {e}"))?;
 
     match agentos_tools::chain::verify(&text) {
-        Ok(v) => {
-            println!("ok      {} records chained, log is intact", v.records);
-            println!("head    {}", v.head_hex());
-            Ok(std::process::ExitCode::SUCCESS)
-        }
         Err(fault) => {
+            // The chain is broken, so there is no head to compare a pin against.
+            // Saying so is the honest answer: a caller pinning heads must not be
+            // handed a mismatch they cannot act on.
             eprintln!("COMPROMISED  {fault}");
-            eprintln!(
-                "head    not established; the chain is broken at the line above"
-            );
+            eprintln!("head    not established; the chain is broken at the line above");
             Ok(std::process::ExitCode::from(1))
         }
+        Ok(v) => {
+            let actual = v.head_hex();
+            if let Some(expected) = pin.as_deref() {
+                // Case-insensitive: the pin is operator-supplied configuration
+                // copied by hand, not a secret, and rejecting a valid pin over
+                // its case would be a worse failure than accepting either.
+                if !actual.eq_ignore_ascii_case(expected.trim()) {
+                    eprintln!("PIN MISMATCH  the chain is intact, but it is not the ledger you pinned.");
+                    eprintln!("  expected head: {}", expected.trim());
+                    eprintln!("  actual head:   {actual}");
+                    eprintln!(
+                        "\nAn intact chain with a different head means the file changed at the\n\
+                         END: records were truncated or the log was rolled over. That is the\n\
+                         one tamper a keyless chain cannot see, because a truncated log is\n\
+                         a shorter but perfectly valid prefix."
+                    );
+                    return Ok(std::process::ExitCode::from(2));
+                }
+                println!("ok      {} records chained, log is intact", v.records);
+                println!("head    {actual} (matches pin)");
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
+            println!("ok      {} records chained, log is intact", v.records);
+            println!("head    {actual}");
+            Ok(std::process::ExitCode::SUCCESS)
+        }
     }
+}
+
+/// Whether `raw` could be a ledger head.
+///
+/// Shape only, and deliberately so: the chain is keyless, so this is a typo
+/// guard, not a security check. An operator who mistypes a pin should be told
+/// immediately, not after the log has been read and reported as compromised.
+fn validate_pin(raw: &str) -> Result<(), String> {
+    let trimmed = raw.trim();
+    let valid = trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit());
+    if !valid {
+        eprintln!("agentos: `--pin {trimmed}` is not a ledger head.");
+        eprintln!("  expected 64 hexadecimal characters, as printed by `audit verify`");
+        eprintln!("  got {} character(s){}", trimmed.len(),
+            if trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                ""
+            } else {
+                " containing a non-hex character"
+            });
+    }
+    valid
+        .then_some(())
+        .ok_or_else(|| "bad pin".to_string())
 }

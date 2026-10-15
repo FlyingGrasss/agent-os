@@ -65,6 +65,25 @@ pub struct DaemonState {
 }
 
 impl DaemonState {
+    /// Assemble the daemon's state.
+    ///
+    /// Eight arguments trips `clippy::too_many_arguments`, and the lint is right
+    /// in general -- this is a smell that usually means the values want to be a
+    /// type. Two things argue against grouping them here.
+    ///
+    /// First, these are constructor arguments, not a value that is passed around:
+    /// they are each read exactly once, immediately, into a struct field. A
+    /// `DaemonConfig` would be constructed, destructured on the next line, and
+    /// then behave identically -- ceremony that makes the call sites harder to
+    /// read without making them harder to get wrong.
+    ///
+    /// Second, the fields are not co-varying. `token` and `requires_auth` are a
+    /// pair, `ceiling` and `model` are operator configuration, `backend` and the
+    /// two shared handles are plumbing, and `max_concurrent_tasks` is a capacity.
+    /// Any grouping would be a judgement about which of those belong together, and
+    /// a wrong one would put `token` somewhere it looks unrelated to
+    /// `requires_auth` -- which is precisely the pairing that has to stay obvious.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ceiling: Ceiling,
         backend: Box<dyn Backend + Send>,

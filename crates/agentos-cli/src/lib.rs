@@ -172,6 +172,12 @@ pub mod daemon;
 /// Client for connecting to the daemon.
 pub mod client;
 
+/// One resolver for the variables the daemon and the client share.
+///
+/// Exists because the two halves once used different spellings for the same
+/// setting, and the failure was silent. See [`env`] for the rule.
+pub mod env;
+
 /// Interactive REPL over the daemon.
 pub mod repl;
 

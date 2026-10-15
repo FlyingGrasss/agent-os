@@ -443,23 +443,23 @@ fn ceiling_from_env() -> Ceiling {
 
 /// Decide where to listen.
 ///
-/// The environment may set `AGENTOSD_SOCKET` (Unix only) or `AGENTOSD_TCP_ADDR`.
-/// Neither set means loopback TCP on the default port.
+/// Accepts either spelling of both shared variables, so a daemon started with
+/// `AGENTOS_SOCKET` and a client started with `AGENTOSD_SOCKET` still meet — and,
+/// more usefully, so an operator who sets only one of them cannot get a listener
+/// on an address the other half is not looking at. Neither set means loopback TCP
+/// on the default port.
 fn listen_from_env() -> Result<Listen, String> {
     #[cfg(unix)]
-    if let Ok(path) = std::env::var("AGENTOSD_SOCKET") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return Ok(Listen::Unix(PathBuf::from(trimmed)));
-        }
+    if let Some((name, path)) = crate::env::resolve(crate::env::SOCKET_PATH)? {
+        eprintln!("agentosd: socket path from {name}");
+        return Ok(Listen::Unix(PathBuf::from(path)));
     }
 
-    let addr = match std::env::var("AGENTOSD_TCP_ADDR") {
-        Ok(raw) => raw
-            .trim()
+    let addr = match crate::env::resolve(crate::env::TCP_ADDR)? {
+        Some((name, raw)) => raw
             .parse::<std::net::SocketAddr>()
-            .map_err(|e| format!("AGENTOSD_TCP_ADDR is not a socket address: {e}"))?,
-        Err(_) => std::net::SocketAddr::from(([127, 0, 0, 1], DEFAULT_TCP_PORT)),
+            .map_err(|e| format!("{name} is not a socket address: {e}"))?,
+        None => std::net::SocketAddr::from(([127, 0, 0, 1], DEFAULT_TCP_PORT)),
     };
     Ok(Listen::Tcp(addr))
 }

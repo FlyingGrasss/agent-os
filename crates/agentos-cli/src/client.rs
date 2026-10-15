@@ -101,12 +101,13 @@ impl AuthToken {
     }
 
     /// The default token file path.
+    ///
+    /// Accepts `AGENTOS_TOKEN_FILE` or `AGENTOSD_TOKEN_FILE` — the same two names
+    /// the daemon writes under. An operator who set one for the daemon no longer
+    /// has to know there is a second name, which was the whole point of the split.
     pub fn default_path() -> Result<PathBuf, String> {
-        if let Ok(explicit) = std::env::var("AGENTOS_TOKEN_FILE") {
-            let trimmed = explicit.trim();
-            if !trimmed.is_empty() {
-                return Ok(PathBuf::from(trimmed));
-            }
+        if let Some((_, explicit)) = crate::env::resolve(crate::env::TOKEN_PATH)? {
+            return Ok(PathBuf::from(explicit));
         }
 
         let base = std::env::var("XDG_STATE_HOME")
@@ -132,23 +133,50 @@ impl AuthToken {
 /// Discover the daemon's endpoint.
 ///
 /// Order:
-/// 1. `AGENTOS_SOCKET` → Unix socket
-/// 2. `AGENTOS_TCP_ADDR` → TCP
-/// 3. Unix socket at `$XDG_RUNTIME_DIR/agentosd/agentosd.sock` or `/tmp/agentosd-<pid>/agentosd.sock`
+/// 1. `AGENTOS_SOCKET` / `AGENTOSD_SOCKET` → Unix socket
+/// 2. `AGENTOS_TCP_ADDR` / `AGENTOSD_TCP_ADDR` → TCP
+/// 3. Unix socket at `$XDG_RUNTIME_DIR/agentosd.sock` or `/tmp/agentosd-<pid>/agentosd.sock`
 /// 4. TCP at `127.0.0.1:54321`
+///
+/// Both spellings are accepted for the shared variables. Previously this read
+/// only `AGENTOS_TCP_ADDR`, so an operator who configured the daemon with
+/// `AGENTOSD_TCP_ADDR` and ran `agentos check` was silently sent to the default
+/// port: no warning, and a connection error naming an address they never set.
+///
+/// A set-but-unparseable address is now reported rather than skipped. It used to
+/// fall through to the next candidate, so a typo looked like the variable was
+/// unset — which is the same silent failure one step further along.
 pub fn discover_endpoint() -> DaemonEndpoint {
     // 1. Explicit environment override
-    if let Ok(path) = std::env::var("AGENTOS_SOCKET") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            eprintln!("agentos: discovered Unix socket via AGENTOS_SOCKET: {}", trimmed);
-            return DaemonEndpoint::Unix(PathBuf::from(trimmed));
+    match crate::env::resolve(crate::env::SOCKET_PATH) {
+        Ok(Some((name, path))) => {
+            eprintln!("agentos: discovered Unix socket via {name}: {path}");
+            return DaemonEndpoint::Unix(PathBuf::from(path));
+        }
+        Ok(None) => {}
+        Err(conflict) => {
+            eprintln!("agentos: {conflict}");
+            return DaemonEndpoint::Tcp(unreachable_default());
         }
     }
-    if let Ok(addr) = std::env::var("AGENTOS_TCP_ADDR") {
-        if let Ok(parsed) = addr.trim().parse::<SocketAddr>() {
-            eprintln!("agentos: discovered TCP address via AGENTOS_TCP_ADDR: {}", parsed);
-            return DaemonEndpoint::Tcp(parsed);
+
+    match crate::env::resolve(crate::env::TCP_ADDR) {
+        Ok(Some((name, raw))) => match raw.trim().parse::<SocketAddr>() {
+            Ok(parsed) => {
+                eprintln!("agentos: discovered TCP address via {name}: {parsed}");
+                return DaemonEndpoint::Tcp(parsed);
+            }
+            Err(e) => {
+                // Report and stop guessing. Falling through here would connect to
+                // somewhere the operator did not ask for.
+                eprintln!("agentos: {name} is not a socket address ({e}); using it verbatim is unsafe, so not connecting");
+                return DaemonEndpoint::Tcp(unreachable_default());
+            }
+        },
+        Ok(None) => {}
+        Err(conflict) => {
+            eprintln!("agentos: {conflict}");
+            return DaemonEndpoint::Tcp(unreachable_default());
         }
     }
 
@@ -169,11 +197,19 @@ pub fn discover_endpoint() -> DaemonEndpoint {
     DaemonEndpoint::Tcp("127.0.0.1:54321".parse().unwrap())
 }
 
+/// An address nothing listens on, returned when the environment is unusable.
+///
+/// Port 1 on loopback. Deliberately *not* the real default: if the refusal path
+/// ever produced a working connection, that would be an authentication bypass
+/// wearing a usability fix.
+fn unreachable_default() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 1))
+}
+
 /// A connected client session.
 pub struct Client {
     stream: ClientStream,
     endpoint: DaemonEndpoint,
-    needs_auth: bool,
 }
 
 #[cfg(unix)]
@@ -265,11 +301,7 @@ impl Client {
 
         eprintln!("agentos: connected, authenticating={}", needs_auth);
 
-        let mut client = Self {
-            stream,
-            endpoint,
-            needs_auth,
-        };
+        let mut client = Self { stream, endpoint };
 
         // Authenticate on TCP
         if needs_auth {
