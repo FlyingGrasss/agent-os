@@ -79,7 +79,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agentos_types::{Label, SourceId, SourceKind, Val};
@@ -603,6 +603,94 @@ impl AuditSink for MemorySink {
     }
 }
 
+/// Identity of a file on disk, as far as stable Rust can see it.
+///
+/// # Why this type exists
+///
+/// A long-running daemon holds an open descriptor to the audit log. If anything
+/// replaces the *path* while that descriptor is open — `logrotate`'s default
+/// rename-and-create, an editor's atomic save, a restore from backup, a `mv` over
+/// the top — the descriptor keeps working and keeps accepting writes, but the
+/// bytes now land in an inode with no name. Everything that reads the log by path
+/// sees a different file. The daemon appears healthy; `agentos audit verify` passes
+/// on the replacement; and every subsequent record goes somewhere nobody can read.
+///
+/// That is the failure this type detects. It is not hypothetical: it was observed
+/// during live testing, with six records written to an unlinked inode while the
+/// file on disk still verified as pristine.
+///
+/// # Platform fidelity, stated plainly
+///
+/// On Unix this is exact: `st_dev` and `st_ino` together name one file, and any
+/// replacement changes at least one of them.
+///
+/// On Windows the equivalent accessors (`MetadataExt::volume_serial_number` and
+/// `file_index`) are still unstable in std, so this falls back to a *proxy*:
+/// creation time and size. That catches rotation, truncation, and restore-from-
+/// backup — anything that produces a new or smaller file — and will miss a
+/// replacement that happens to reuse both a creation time and a size. The check is
+/// therefore sound as a backstop on Windows and exact on Unix; it is not a
+/// substitute for something on a platform where this project does not run its
+/// daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+}
+
+impl FileIdentity {
+    /// Identity as seen from an open descriptor.
+    ///
+    /// Taken from the handle rather than from the path deliberately: the path can
+    /// be swapped between a check and its use, but the descriptor cannot be
+    /// pointed somewhere else behind our back.
+    pub fn of_open_file(file: &std::fs::File) -> std::io::Result<Self> {
+        Self::of_metadata(&file.metadata()?)
+    }
+
+    /// Identity as seen from whatever the path currently names.
+    pub fn of_path(path: &Path) -> std::io::Result<Self> {
+        Self::of_metadata(&std::fs::metadata(path)?)
+    }
+
+    /// Bytes in the file when this identity was taken.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn of_metadata(meta: &std::fs::Metadata) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        let (device, inode) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.dev(), meta.ino())
+        };
+        #[cfg(windows)]
+        let (device, inode) = {
+            use std::os::windows::fs::MetadataExt;
+            // No stable volume serial number, so this is a creation-time proxy.
+            // `last_write_time` is deliberately excluded: this sink's own writes
+            // change it, and an identity that moves under us would make every
+            // append look like a rotation.
+            (0u64, meta.creation_time())
+        };
+        #[cfg(not(any(unix, windows)))]
+        let (device, inode) = (0u64, 0u64);
+
+        Ok(Self {
+            device,
+            inode,
+            size: meta.len(),
+        })
+    }
+}
+
+impl std::fmt::Display for FileIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "dev={} ino={} size={}", self.device, self.inode, self.size)
+    }
+}
+
 /// Newline-delimited JSON on disk, each line chained to the one before it.
 ///
 /// Opened once, in append mode, at construction. The file is never reopened per
@@ -615,10 +703,24 @@ impl AuditSink for MemorySink {
 /// from genesis instead would make the reopened log fail verification, and
 /// ignoring the existing history would let a tampered tail be laundered by a
 /// restart.
+///
+/// # The path is re-checked before every append
+///
+/// Holding a descriptor open for the life of the process is what makes append-only
+/// work, and it is also what lets a rotated log go unnoticed. So each append
+/// re-reads the identity of the *path* and refuses to write if it no longer names
+/// the file this sink holds. The cost is one `stat` per record, against a
+/// `write` + `fsync` that costs far more; the alternative is an audit trail that
+/// quietly diverts into an unlinked inode.
 #[derive(Debug)]
 pub struct FileSink {
     file: std::fs::File,
     chain: Chain,
+    /// Identity of the file this sink holds, refreshed from the descriptor after
+    /// every successful append so it always describes the current end of the file.
+    identity: FileIdentity,
+    /// Where the log is expected to live. Kept for the rotation check.
+    path: PathBuf,
 }
 
 impl FileSink {
@@ -629,8 +731,8 @@ impl FileSink {
     /// that stopped, because every subsequent record inherits the break and the
     /// damage stops being visible.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuditError> {
-        let path = path.as_ref();
-        let head = match std::fs::read_to_string(path) {
+        let path = path.as_ref().to_path_buf();
+        let head = match std::fs::read_to_string(&path) {
             Ok(existing) => chain::head_of_existing(&existing).map_err(|fault| {
                 AuditError::Build(format!("refusing to append to a broken audit log: {fault}"))
             })?,
@@ -641,22 +743,80 @@ impl FileSink {
         let file = OpenOptions::new()
             .append(true)
             .create(true)
-            .open(path)?;
+            .open(&path)?;
+        // From the descriptor, not the path: if the two already disagree at open
+        // time there is nothing coherent to append to.
+        let identity = FileIdentity::of_open_file(&file).map_err(|e| {
+            AuditError::LogRotatedOrReplaced(format!("cannot identify the opened log: {e}"))
+        })?;
+
         Ok(Self {
             file,
             chain: Chain::resume(head),
+            identity,
+            path,
         })
+    }
+
+    /// What this sink currently believes it is writing to.
+    ///
+    /// Exposed so an operator or a test can see what the sink thinks the log is,
+    /// rather than having to infer it from the file system.
+    pub fn identity(&self) -> FileIdentity {
+        self.identity
+    }
+
+    /// The path this sink appends to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Refuse to write if the path no longer names the file this sink holds.
+    ///
+    /// Returns the reason rather than a bool so the error an operator reads names
+    /// both identities.
+    fn check_not_rotated(&self) -> Result<(), AuditError> {
+        let found = FileIdentity::of_path(&self.path).map_err(|e| {
+            AuditError::LogRotatedOrReplaced(format!(
+                "the log at {} cannot be read: {e}. It may have been rotated or removed; \
+                 the descriptor this daemon holds now points at a file with no path.",
+                self.path.display()
+            ))
+        })?;
+
+        if found == self.identity {
+            return Ok(());
+        }
+        Err(AuditError::LogRotatedOrReplaced(format!(
+            "{} now holds {found}, but this daemon holds {}. Continuing would append \
+             to a file nothing can read.",
+            self.path.display(),
+            self.identity
+        )))
     }
 }
 
 impl AuditSink for FileSink {
     fn append(&mut self, record: &AuditRecord) -> Result<(), AuditError> {
+        // Before the record is built, and therefore before any caller believes an
+        // intent exists. `PolicyHost::call` turns this error into a rejection and
+        // never invokes the tool, so a rotated log stops work rather than letting
+        // it run unrecorded.
+        self.check_not_rotated()?;
+
         let body = serde_json::to_string(record)?;
         let line = self.chain.seal(&body);
         self.file.write_all(line.as_bytes())?;
         self.file.write_all(b"\n")?;
         self.file.flush()?;
         self.file.sync_data()?;
+
+        // Re-read from the descriptor, not the path: our own write changed the
+        // size, and on platforms where the proxy identity includes size it changed
+        // everything the next check compares against.
+        self.identity = FileIdentity::of_open_file(&self.file).map_err(|e| {
+            AuditError::LogRotatedOrReplaced(format!("cannot re-identify the log after appending: {e}"))
+        })?;
         Ok(())
     }
 }
@@ -704,6 +864,14 @@ pub enum AuditError {
     /// effect.
     #[error("audit record could not be built: {0}")]
     Build(String),
+    /// The log file was rotated, replaced, or removed underneath an open sink.
+    ///
+    /// Separate from [`AuditError::Io`] because the fix is different: a retry will
+    /// not help, and appending anyway is the failure this exists to prevent. The
+    /// descriptor is still valid — writes to it would succeed and be lost.
+    #[error("audit log file was rotated, replaced, or removed on disk; refusing to \
+             append to an orphaned descriptor: {0}")]
+    LogRotatedOrReplaced(String),
 }
 
 /// The append-only log.
