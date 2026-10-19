@@ -18,7 +18,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentos_tools::audit::{
-    AuditEntry, AuditError, AuditRecord, AuditSink, BoundedText, FileIdentity, FileSink, OutcomeKind,
+    AuditEntry, AuditError, AuditRecord, AuditSink, BoundedText, FileIdentity, FileSink,
+    PolicySummary,
 };
 
 struct Scratch(PathBuf);
@@ -47,16 +48,19 @@ impl Drop for Scratch {
 /// Built by hand rather than through `AuditLog` because this file is about the
 /// *sink*: `AuditLog` takes ownership of its sink, which makes it impossible to
 /// hold one open, rotate the file, and keep appending -- which is the entire
-/// scenario. Sequence numbers are tracked here so the chain stays well formed and
-/// the "nothing moved" case can assert a valid ledger at the end.
-fn append_one(sink: &mut FileSink, seq: u64) -> Result<(), AuditError> {
-    sink.append(&AuditRecord {
-        seq,
+/// scenario.
+///
+/// The record is an `Attempt`, which carries no sequence number, because the sink
+/// assigns `seq` itself. A hand-tracked number here would only be overwritten.
+fn append_one(sink: &mut FileSink) -> Result<(), AuditError> {
+    sink.append(&mut AuditRecord {
+        seq: 0,
         at_unix_ms: 1_700_000_000_000,
-        entry: AuditEntry::Outcome {
+        entry: AuditEntry::Attempt {
             tool: BoundedText::new("fs.write", 64),
-            attempt: seq.saturating_sub(1),
-            result: OutcomeKind::Succeeded { elapsed_ms: 1 },
+            args: Vec::new(),
+            omitted_args: 0,
+            policy: PolicySummary::Allowed,
         },
     })
 }
@@ -75,7 +79,7 @@ fn a_sink_refuses_to_append_after_the_log_is_renamed_away() {
     let path = s.log();
 
     let mut sink = FileSink::open(&path).expect("open");
-    append_one(&mut sink, 1).expect("first append works");
+    append_one(&mut sink).expect("first append works");
     let before = size_of(&path);
     assert!(before > 0, "nothing was written");
 
@@ -84,7 +88,7 @@ fn a_sink_refuses_to_append_after_the_log_is_renamed_away() {
     fs::write(&path, "").expect("create replacement");
 
     // The descriptor is still perfectly valid. That is the whole problem.
-    let err = append_one(&mut sink, 2).expect_err("must refuse after rotation");
+    let err = append_one(&mut sink).expect_err("must refuse after rotation");
     assert!(
         matches!(err, AuditError::LogRotatedOrReplaced(_)),
         "expected a rotation fault, got {err:?}"
@@ -110,14 +114,14 @@ fn the_faithful_case_does_not_divert_the_audit_trail() {
     let path = s.log();
 
     let mut sink = FileSink::open(&path).expect("open");
-    append_one(&mut sink, 1).expect("append");
+    append_one(&mut sink).expect("append");
     let recorded_before = size_of(&path);
 
     fs::rename(&path, s.0.join("audit.log.1")).expect("rotate");
     fs::write(&path, "").expect("replace");
 
-    let _ = append_one(&mut sink, 2); // expected to fail
-    let _ = append_one(&mut sink, 3); // and to keep failing
+    let _ = append_one(&mut sink); // expected to fail
+    let _ = append_one(&mut sink); // and to keep failing
 
     assert_eq!(size_of(&path), 0, "the path must not grow");
     assert_eq!(
@@ -137,11 +141,11 @@ fn a_sink_refuses_after_the_log_is_deleted_outright() {
     let path = s.log();
 
     let mut sink = FileSink::open(&path).expect("open");
-    append_one(&mut sink, 1).expect("append");
+    append_one(&mut sink).expect("append");
 
     fs::remove_file(&path).expect("unlink");
 
-    let err = append_one(&mut sink, 2).expect_err("must refuse after unlink");
+    let err = append_one(&mut sink).expect_err("must refuse after unlink");
     assert!(
         matches!(err, AuditError::LogRotatedOrReplaced(_)),
         "a deleted path is the same class of fault, got {err:?}"
@@ -157,12 +161,12 @@ fn a_sink_refuses_after_the_log_is_truncated_in_place() {
     let path = s.log();
 
     let mut sink = FileSink::open(&path).expect("open");
-    append_one(&mut sink, 1).expect("append");
+    append_one(&mut sink).expect("append");
     let before = size_of(&path);
 
     fs::write(&path, "").expect("copytruncate");
 
-    let err = append_one(&mut sink, 2).expect_err("must refuse after truncate");
+    let err = append_one(&mut sink).expect_err("must refuse after truncate");
     assert!(
         matches!(err, AuditError::LogRotatedOrReplaced(_)),
         "expected a rotation fault, got {err:?}"
@@ -180,7 +184,7 @@ fn a_sink_keeps_working_when_nothing_moved() {
 
     let mut sink = FileSink::open(&path).expect("open");
     for i in 1..=25u64 {
-        append_one(&mut sink, i).unwrap_or_else(|e| panic!("append {i} refused: {e}"));
+        append_one(&mut sink).unwrap_or_else(|e| panic!("append {i} refused: {e}"));
     }
 
     assert!(size_of(&path) > 0, "nothing was written");
@@ -199,7 +203,7 @@ fn reopening_after_rotation_adopts_the_new_file_and_its_chain() {
     let path = s.log();
 
     let mut sink = FileSink::open(&path).expect("open");
-    append_one(&mut sink, 1).expect("append");
+    append_one(&mut sink).expect("append");
     let before = size_of(&path);
 
     fs::rename(&path, s.0.join("audit.log.1")).expect("rotate");
@@ -211,7 +215,7 @@ fn reopening_after_rotation_adopts_the_new_file_and_its_chain() {
         FileIdentity::of_path(&path).expect("identity"),
         "the reopened sink must describe the file at the path"
     );
-    append_one(&mut sink, 1).expect("append to the new file");
+    append_one(&mut sink).expect("append to the new file");
 
     let text = fs::read_to_string(&path).expect("read");
     let v = agentos_tools::chain::verify(&text).expect("new file is a valid chain");

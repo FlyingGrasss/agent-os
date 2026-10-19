@@ -64,12 +64,16 @@ struct LockedSink(SharedSink);
 impl AuditSink for LockedSink {
     fn append(
         &mut self,
-        record: &agentos_tools::audit::AuditRecord,
+        record: &mut agentos_tools::audit::AuditRecord,
     ) -> Result<(), agentos_tools::audit::AuditError> {
         // A poisoned audit mutex means some other task panicked while holding it.
         // Refusing to write rather than writing anyway: an audit record is
         // evidence, and evidence written after losing track of the log's state is
         // worse than a loud failure that stops the daemon.
+        //
+        // The sequence number is assigned by the inner sink while this lock is
+        // held, which is what makes it unique across tasks even though each task
+        // owns its own `AuditLog`.
         self.0
             .lock()
             .map_err(|_| {
@@ -78,6 +82,13 @@ impl AuditSink for LockedSink {
                 )
             })?
             .append(record)
+    }
+
+    fn peek_next_seq(&self) -> u64 {
+        // Advisory only: another task may append before the caller's next append,
+        // so this reads a value that is about to be stale by design. The number
+        // that reaches a record is the one `append` assigns under the lock.
+        self.0.lock().map(|s| s.peek_next_seq()).unwrap_or(0)
     }
 }
 
@@ -179,9 +190,14 @@ pub fn run_task(
     }
 
     // `AuditLog` owns its sink and clock outright, so the shared mutexes are moved
-    // into owned boxes here. Each task gets its own `AuditLog` over the same file:
-    // `AuditLog` holds a sequence counter, and sharing one counter across tasks
-    // would mean sharing the whole `PolicyHost` with them.
+    // into owned boxes here. Each task gets its own `AuditLog` over the same file.
+    //
+    // That is now purely about ownership, not about the sequence counter: the
+    // counter lives in the sink (`FileSink::next_seq`), which every task shares, so
+    // `seq` is ledger-wide even though the `AuditLog` wrapper is per-task. An
+    // earlier version kept the counter in `AuditLog` and argued that sharing it
+    // would mean sharing the whole `PolicyHost`; moving it into the sink removes
+    // that constraint entirely.
     //
     // The lock is held only for the duration of one `append` or one clock read,
     // never across a tool call, so one task's slow work cannot stall another's

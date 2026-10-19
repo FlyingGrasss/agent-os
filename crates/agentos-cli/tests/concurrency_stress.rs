@@ -20,12 +20,10 @@
 //! * The inode stays stable, so the rotation guard does not fire spuriously.
 //! * Nothing deadlocks: every wait is bounded, so a hang fails the test instead
 //!   of stalling CI.
-//!
-//! One finding is expected and asserted rather than papered over: `AuditRecord::seq`
-//! is per-task, not global. Each task builds its own `AuditLog` with its own
-//! counter, so fifty concurrent tasks produce fifty records numbered `1`, `2`, …
-//! The chain is unaffected — it is computed over bytes, not sequence numbers —
-//! but the field's documentation claims otherwise and that claim is false.
+//! * `seq` is ledger-wide: fifty concurrent tasks append records numbered `1`
+//!   through `n` with no repeats and no gaps. This used to be false -- the counter
+//!   lived in each task's `AuditLog` -- and the test that pinned the old behaviour
+//!   was inverted rather than deleted when the counter moved into the shared sink.
 
 use std::io::Write as _;
 use std::time::{Duration, Instant};
@@ -188,11 +186,15 @@ fn dispatch(
     (all.into_iter().map(|(d, _)| d).collect(), replies)
 }
 
-/// `seq` is per-task, not global. Documented as an observation rather than a
-/// wish: if this ever becomes true the assertion should be inverted deliberately,
-/// not deleted because it stopped failing.
+/// `seq` is ledger-wide and strictly monotonic, even with eight tasks appending
+/// to one log through one shared sink.
+///
+/// This is the inverted form of the test that used to assert the opposite. The
+/// counter now lives in the sink, so the numbers are unique across tasks. A
+/// regression that moved it back into `AuditLog` would produce repeats here and
+/// nowhere else.
 #[test]
-fn sequence_numbers_are_per_task_which_the_field_docs_overstate() {
+fn sequence_numbers_are_ledger_wide_and_strictly_monotonic() {
     const CLIENTS: usize = 8;
     const TASKS: usize = 8;
 
@@ -215,14 +217,20 @@ fn sequence_numbers_are_per_task_which_the_field_docs_overstate() {
         .collect();
 
     assert!(!seqs.is_empty(), "no records were written");
-    assert!(
-        seqs.windows(2).any(|w| w[0] >= w[1]),
-        "expected to observe repeated or non-increasing sequence numbers across \
-         tasks, saw {seqs:?}"
+
+    // Exactly 1..=n, in order: no repeats (per-task counters) and no gaps (a
+    // number spent on an append that never landed).
+    let expected: Vec<u64> = (1..=seqs.len() as u64).collect();
+    assert_eq!(
+        seqs, expected,
+        "sequence numbers must be a ledger-wide total order; a repeated or missing \
+         value means the counter is not shared correctly"
     );
+
     println!(
-        "[stress/seq] {} records, first few seq values: {:?}",
+        "[stress/seq] {} records, seq {}..={}",
         seqs.len(),
-        &seqs[..seqs.len().min(10)]
+        seqs.first().copied().unwrap_or(0),
+        seqs.last().copied().unwrap_or(0)
     );
 }

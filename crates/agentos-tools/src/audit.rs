@@ -455,7 +455,17 @@ impl OutcomeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditRecord {
-    /// Monotonic, 1-based, never reused and never reordered by this API.
+    /// Ledger-wide, 1-based, never reused and never reordered.
+    ///
+    /// Assigned by the sink, not by [`AuditLog`]. A sink is the shared,
+    /// serialized resource -- for the daemon, one [`FileSink`] behind one mutex --
+    /// so there is one counter per ledger and two tasks appending concurrently
+    /// cannot both be handed `1`. Within a daemon this is therefore monotonic
+    /// across tasks, and reopening a log resumes past the records already on disk
+    /// rather than restarting at 1.
+    ///
+    /// Its contractual use is the [`AuditEntry::Outcome`] back-reference to the
+    /// [`AuditEntry::Attempt`] record it closes.
     pub seq: u64,
     /// Wall clock, milliseconds since the Unix epoch, as reported by the
     /// injected [`Clock`]. Deterministic tests supply a fixed clock.
@@ -536,8 +546,25 @@ impl AttemptToken {
 /// reopens its destination in truncate mode on every call violates I6 while
 /// still satisfying the signature. [`FileSink`] opens once and appends.
 pub trait AuditSink: Send {
-    /// Append one record. Must not modify anything already appended.
-    fn append(&mut self, record: &AuditRecord) -> Result<(), AuditError>;
+    /// Append one record, stamping it with the ledger's next sequence number.
+    ///
+    /// The sink owns the counter. Ownership used to sit in [`AuditLog`], which
+    /// meant one counter per task, which meant fifty concurrent tasks produced
+    /// fifty records numbered `1`, `2`, ... The sink is the thing that is
+    /// genuinely shared and serialized, so allocating here is what makes
+    /// [`AuditRecord::seq`] a ledger-wide total order.
+    ///
+    /// Takes `&mut` so the number is in the record before it is serialized,
+    /// hashed, and written. A refused append must not consume a number: assign
+    /// after every fallible check, immediately before serializing.
+    fn append(&mut self, record: &mut AuditRecord) -> Result<(), AuditError>;
+
+    /// The sequence number the next successful append will carry.
+    ///
+    /// Diagnostic and inherently racy across tasks -- another append may land
+    /// before the caller's next one. The number that reaches a record is always
+    /// the one `append` assigned under its own lock.
+    fn peek_next_seq(&self) -> u64;
 }
 
 /// In-memory sink, plus a reader handle that can be shared across the effect an
@@ -546,10 +573,21 @@ pub trait AuditSink: Send {
 /// The indirection through `Arc<Mutex<_>>` is what lets a closure passed to
 /// [`AuditLog::run_audited`] read the log while the log itself is borrowed
 /// mutably, which is what the durability test does.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MemorySink {
     lines: Arc<Mutex<Vec<String>>>,
     chain: Chain,
+    next_seq: u64,
+}
+
+impl Default for MemorySink {
+    fn default() -> Self {
+        Self {
+            lines: Arc::default(),
+            chain: Chain::default(),
+            next_seq: 1,
+        }
+    }
 }
 
 /// A read-only view of a [`MemorySink`].
@@ -592,14 +630,22 @@ impl MemoryReader {
 }
 
 impl AuditSink for MemorySink {
-    fn append(&mut self, record: &AuditRecord) -> Result<(), AuditError> {
+    fn append(&mut self, record: &mut AuditRecord) -> Result<(), AuditError> {
+        // Assigned before serializing, incremented only after the push succeeds,
+        // so a failure leaves the counter untouched.
+        record.seq = self.next_seq;
         let body = serde_json::to_string(record)?;
         let line = self.chain.seal(&body);
         self.lines
             .lock()
             .expect("memory sink poisoned")
             .push(line);
+        self.next_seq += 1;
         Ok(())
+    }
+
+    fn peek_next_seq(&self) -> u64 {
+        self.next_seq
     }
 }
 
@@ -728,6 +774,10 @@ impl std::fmt::Display for FileIdentity {
 pub struct FileSink {
     file: std::fs::File,
     chain: Chain,
+    /// The ledger-wide sequence counter. Lives here rather than in each task's
+    /// `AuditLog` because this sink is the one object every task shares, so the
+    /// number it hands out is unique across them.
+    next_seq: u64,
     /// Identity of the file this sink holds, refreshed from the descriptor after
     /// every successful append so it always describes the current end of the file.
     identity: FileIdentity,
@@ -744,11 +794,14 @@ impl FileSink {
     /// damage stops being visible.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuditError> {
         let path = path.as_ref().to_path_buf();
-        let head = match std::fs::read_to_string(&path) {
-            Ok(existing) => chain::head_of_existing(&existing).map_err(|fault| {
-                AuditError::Build(format!("refusing to append to a broken audit log: {fault}"))
-            })?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => chain::genesis(),
+        let (head, existing_records) = match std::fs::read_to_string(&path) {
+            Ok(existing) => {
+                let (records, head) = chain::resume_of_existing(&existing).map_err(|fault| {
+                    AuditError::Build(format!("refusing to append to a broken audit log: {fault}"))
+                })?;
+                (head, records)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (chain::genesis(), 0),
             Err(e) => return Err(e.into()),
         };
 
@@ -765,6 +818,10 @@ impl FileSink {
         Ok(Self {
             file,
             chain: Chain::resume(head),
+            // Resume past the records already on disk. Starting at 1 again would
+            // reintroduce the very defect this change fixes, just across a restart
+            // instead of across tasks.
+            next_seq: existing_records + 1,
             identity,
             path,
         })
@@ -809,12 +866,17 @@ impl FileSink {
 }
 
 impl AuditSink for FileSink {
-    fn append(&mut self, record: &AuditRecord) -> Result<(), AuditError> {
-        // Before the record is built, and therefore before any caller believes an
-        // intent exists. `PolicyHost::call` turns this error into a rejection and
-        // never invokes the tool, so a rotated log stops work rather than letting
-        // it run unrecorded.
+    fn append(&mut self, record: &mut AuditRecord) -> Result<(), AuditError> {
+        // Before the sequence number is spent, and therefore before any caller
+        // believes an intent exists. `PolicyHost::call` turns this error into a
+        // rejection and never invokes the tool, so a rotated log stops work rather
+        // than letting it run unrecorded -- and a refusal here consumes no number.
         self.check_not_rotated()?;
+
+        // Allocated after the only check that can fail, immediately before the
+        // bytes are sealed and written, so `peek_next_seq` still reports the number
+        // this append will use.
+        record.seq = self.next_seq;
 
         let body = serde_json::to_string(record)?;
         let line = self.chain.seal(&body);
@@ -829,7 +891,12 @@ impl AuditSink for FileSink {
         self.identity = FileIdentity::of_open_file(&self.file).map_err(|e| {
             AuditError::LogRotatedOrReplaced(format!("cannot re-identify the log after appending: {e}"))
         })?;
+        self.next_seq += 1;
         Ok(())
+    }
+
+    fn peek_next_seq(&self) -> u64 {
+        self.next_seq
     }
 }
 
@@ -888,26 +955,24 @@ pub enum AuditError {
 
 /// The append-only log.
 ///
-/// Owns the sequence counter and the sink. There is no method that modifies or
-/// removes a record already handed to the sink.
+/// Owns a sink and a clock. There is no method that modifies or removes a record
+/// already handed to the sink.
+///
+/// The sequence counter deliberately lives in the *sink*, not here, so that every
+/// task sharing one sink shares one counter. See [`AuditSink::append`].
 pub struct AuditLog {
     sink: Box<dyn AuditSink>,
     clock: Box<dyn Clock>,
-    next_seq: u64,
 }
 
 impl AuditLog {
     pub fn new(sink: Box<dyn AuditSink>, clock: Box<dyn Clock>) -> Self {
-        Self {
-            sink,
-            clock,
-            next_seq: 1,
-        }
+        Self { sink, clock }
     }
 
     /// Sequence number the next appended record will carry.
     pub fn peek_next_seq(&self) -> u64 {
-        self.next_seq
+        self.sink.peek_next_seq()
     }
 
     /// Record the intent to perform an action, and return the token that proves
@@ -929,9 +994,9 @@ impl AuditLog {
             (args, &[][..])
         };
 
-        let seq = self.next_seq;
-        let record = AuditRecord {
-            seq,
+        let mut record = AuditRecord {
+            // Stamped by the sink, which owns the ledger-wide counter.
+            seq: 0,
             at_unix_ms: self.clock.now_unix_ms(),
             entry: AuditEntry::Attempt {
                 tool: BoundedText::new(tool, MAX_NAME),
@@ -945,8 +1010,8 @@ impl AuditLog {
                 "a record with no tool name cannot be audited".to_string(),
             ));
         }
-        self.sink.append(&record)?;
-        self.next_seq += 1;
+        self.sink.append(&mut record)?;
+        let seq = record.seq;
         Ok(AttemptToken {
             seq,
             tool: record.tool().to_string(),
@@ -962,9 +1027,11 @@ impl AuditLog {
         token: &AttemptToken,
         result: OutcomeKind,
     ) -> Result<u64, AuditError> {
-        let seq = self.next_seq;
-        let record = AuditRecord {
-            seq,
+        let mut record = AuditRecord {
+            // Stamped by the sink. `attempt` still points at the attempt this
+            // closes, which is why a task's outcome may land far from its attempt
+            // in the file once tasks run concurrently.
+            seq: 0,
             at_unix_ms: self.clock.now_unix_ms(),
             entry: AuditEntry::Outcome {
                 tool: BoundedText::new(&token.tool, MAX_NAME),
@@ -972,9 +1039,8 @@ impl AuditLog {
                 result,
             },
         };
-        self.sink.append(&record)?;
-        self.next_seq += 1;
-        Ok(seq)
+        self.sink.append(&mut record)?;
+        Ok(record.seq)
     }
 
     /// Record the intent, run the effect, record the outcome.
@@ -1006,7 +1072,7 @@ impl AuditLog {
 impl std::fmt::Debug for AuditLog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuditLog")
-            .field("next_seq", &self.next_seq)
+            .field("next_seq", &self.sink.peek_next_seq())
             .finish_non_exhaustive()
     }
 }
@@ -1514,8 +1580,14 @@ mod tests {
         // recorded.
         struct Broken;
         impl AuditSink for Broken {
-            fn append(&mut self, _r: &AuditRecord) -> Result<(), AuditError> {
+            fn append(&mut self, _r: &mut AuditRecord) -> Result<(), AuditError> {
                 Err(AuditError::Sink("disk full".to_string()))
+            }
+
+            // It never accepts anything, so the next number it would hand out is
+            // always the first one.
+            fn peek_next_seq(&self) -> u64 {
+                1
             }
         }
         let mut log = AuditLog::new(Box::new(Broken), Box::new(fixed_clock()));

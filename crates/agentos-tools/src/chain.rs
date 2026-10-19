@@ -366,7 +366,23 @@ pub fn verify(text: &str) -> Result<Verification, ChainFault> {
 /// log does not verify: appending to a log whose history is already broken would
 /// launder the break, because every new line would chain from it.
 pub fn head_of_existing(text: &str) -> Result<[u8; 32], ChainFault> {
-    Ok(verify(text)?.head)
+    Ok(resume_of_existing(text)?.1)
+}
+
+/// The head to resume from *and* the number of records already chained.
+///
+/// The two come from the same verification pass on purpose. A sink reopening a
+/// log has to resume its sequence counter past the records already on disk, and
+/// deriving that count from the pass that computes the head means the two can
+/// never disagree. Returned as `(records, head)` because the count is the primary
+/// quantity here; [`head_of_existing`] is the accessor for callers that want only
+/// the head.
+///
+/// Relies on one record per line and one sequence number per record, which is
+/// what `append` guarantees.
+pub fn resume_of_existing(text: &str) -> Result<(u64, [u8; 32]), ChainFault> {
+    let v = verify(text)?;
+    Ok((v.records, v.head))
 }
 
 #[cfg(test)]
