@@ -317,12 +317,18 @@ fn describe(outcome: &super::protocol::TaskOutcome) -> String {
 
 /// Poll the inbox until interrupted, handling whatever appears.
 ///
-/// # Why this owns no thread of its own
+/// # Why the blocking work is moved off the runtime
 ///
-/// It is a `tokio` task, so a slow poll never blocks the IPC accept loop. The
-/// model is behind a mutex shared with the IPC path, so an inbox task and a CLI
-/// task cannot run at once — which is a throughput property, not a safety one,
-/// since they share no `PolicyHost` and no grants.
+/// This is a `tokio` task, but the work inside it is synchronous: `poll` walks
+/// and stats the directory, and `handle_entry` runs an entire task -- model
+/// request, tool IO, audit fsync. The daemon's runtime is **current-thread**
+/// (`Builder::new_current_thread`), so running either inline would stall every
+/// IPC connection for the duration of a model call. Both halves therefore run on
+/// `spawn_blocking`, which is where `DaemonState::run` already puts its work.
+///
+/// An earlier version of this comment claimed the opposite -- that being a tokio
+/// task was sufficient. It is not: on a current-thread runtime a synchronous call
+/// inside a task is a stop-the-world call.
 ///
 /// # Why a poll failure does not stop the watcher
 ///
@@ -351,7 +357,26 @@ pub async fn watch(
     let mut last_skipped: Option<usize> = None;
 
     loop {
-        match inbox.poll() {
+        // See the doc comment: `poll` blocks, and this runtime is current-thread.
+        // Moving the inbox through the closure and back is what keeps the watcher
+        // alive across polls without putting it behind a lock the IPC path shares.
+        let (returned, poll) = match tokio::task::spawn_blocking(move || {
+            let poll = inbox.poll();
+            (inbox, poll)
+        })
+        .await
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                // The blocking task panicked and took the inbox with it; there is
+                // nothing left to poll. Say so rather than leaving a dead task.
+                eprintln!("agentosd: inbox watcher stopped: {e}");
+                return;
+            }
+        };
+        inbox = returned;
+
+        match poll {
             Ok(poll) => {
                 let skipped = poll.skipped.len();
                 if skipped > 0 && last_skipped != Some(skipped) {
@@ -364,17 +389,27 @@ pub async fn watch(
                     // the sleep. Holding it across the poll interval would block
                     // every IPC task for a second at a time, so a quiet inbox would
                     // quietly serialise the whole daemon. `lock_owned` rather than
-                    // `lock` because this future is spawned and must be `Send`,
+                    // `lock` because this guard is moved into `spawn_blocking`,
                     // and `dyn Backend` is `Send` only behind the mutex.
                     let result = {
                         let mut guard = backend.clone().lock_owned().await;
-                        handle_entry(
-                            &entry,
-                            guard.as_mut(),
-                            &ceiling,
-                            audit_sink.clone(),
-                            clock.clone(),
-                        )
+                        let ceiling = ceiling.clone();
+                        let audit_sink = audit_sink.clone();
+                        let clock = clock.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            handle_entry(&entry, guard.as_mut(), &ceiling, audit_sink, clock)
+                        })
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(e) => {
+                                // One payload that panics the handler must not take
+                                // the watcher down with it; the file is left in
+                                // place and retried, which is visible.
+                                eprintln!("agentosd: inbox entry handler panicked: {e}");
+                                continue;
+                            }
+                        }
                     };
                     // The log line is built by `Handled::log_line`, which is the single place
                     // that decides what an operator sees. Keeping it there means a
