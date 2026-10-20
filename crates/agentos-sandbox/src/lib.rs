@@ -42,7 +42,12 @@
 //!
 //! The rights-handled set is derived from `TARGET_ABI` ([`abi::Abi::V7`]) rather
 //! than from the running kernel, so a given binary produces the same ruleset on
-//! every host. A newer kernel is clamped *down* to V7: unknown rights stay off.
+//! every host. A newer kernel is clamped *down* to V7, so this crate never asks
+//! for a right it has not modelled. Clamping is not itself a restriction:
+//! Landlock only restricts the rights a ruleset names, so a right added after V7
+//! is unhandled and therefore *unrestricted* until it gets a row below, a
+//! [`Feature`], and a seccomp check. "We do not ask for it" and "it is disabled"
+//! are not the same claim, and this table is where the difference is recorded.
 //!
 //! | Capability | Landlock right | Min ABI | Linux | If missing | Why refuse |
 //! |---|---|---|---|---|---|
@@ -61,7 +66,7 @@
 //! | `restrict_self` log flags | `LANDLOCK_RESTRICT_SELF_LOG_*` | V7 | 6.15 | **Refuse** if requested | Only affects audit logging; unused here, listed for completeness |
 //! | Restrict all threads (TSYNC) | `LANDLOCK_RESTRICT_SELF_TSYNC` | V8 | 7.0 | **Refuse** if requested | Not exposed: AgentOS confines a freshly forked single-threaded child, so TSYNC is unnecessary |
 //! | Connect to a peer via inherited UNIX socket | `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` | V9 | 7.1 | **Refuse** | Not implemented; on a V9 kernel a peer holding a connected socket could reach into the child |
-//! | Kernel ABI newer than V7 | - | - | - | **Accept**, clamped to V7 | Unvetted rights stay disabled |
+//! | Kernel ABI newer than V7 | - | - | - | **Accept**, clamped to V7 | The kernel may know rights this crate does not model; those are unhandled, not disabled. `RESOLVE_UNIX` is covered in practice because `connect(2)` is refused, and any future right needs a row here before the profile can claim it |
 //! | `PR_SET_NO_NEW_PRIVS` | `prctl(2)` | always | - | **Refuse** | `landlock_restrict_self` returns `EPERM` without it; with `CAP_SYS_ADMIN` instead, a setuid exec could shed the ruleset |
 //! | cgroup v2 limits | - | - | - | **Not used** | Not delegable to an unprivileged uid on the target host |
 //! | user / mount namespaces | - | - | - | **Not used** | `unshare(CLONE_NEWUSER)` is denied for uid 1000 on the target host |

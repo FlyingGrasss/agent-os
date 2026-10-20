@@ -263,28 +263,14 @@ impl InboxEntry {
     /// cannot reach the contents without the label that says where they came from —
     /// which is what stops a payload from reaching a prompt by accident.
     pub fn read_quarantined(&self) -> Result<Quarantined<String>, InboxError> {
-        // Re-check the size rather than trusting `observed_size`. A file that grew
-        // since the poll is a different file from the one the watcher approved.
-        //
-        // `ensure_regular_file` uses `symlink_metadata`, so a path that has become
-        // a symlink is refused rather than followed. Checking only the length and
-        // then calling `read` would read the *target* of a link planted between
-        // the poll and this call, turning the inbox into a way to read files the
-        // user never put in it.
-        let current = ensure_regular_file(&self.path)?;
-        if current > MAX_PAYLOAD_BYTES {
-            return Err(InboxError::PayloadTooLarge {
-                size: current,
-                limit: MAX_PAYLOAD_BYTES,
-            });
-        }
-
-        let bytes = std::fs::read(&self.path).map_err(InboxError::Payload)?;
-        // Truncate rather than refuse if the read came back under the limit but
-        // the file was still larger — the alternative is rejecting a payload
-        // because of a race the watcher cannot see.
-        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_PAYLOAD_BYTES as usize)])
-            .into_owned();
+        // `read_payload` opens once, with `O_NOFOLLOW`, and bounds the read from
+        // the handle it actually opened. Checking the path and then calling
+        // `std::fs::read` would resolve it twice: a link planted in between is
+        // read as the target, and a file that grew is allocated whole before any
+        // truncation. The inbox directory belongs to whoever drops files into
+        // it, so "in between" is the case worth designing for.
+        let bytes = read_payload(&self.path)?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
         Ok(Quarantined::from_source(text, SourceId::new()))
     }
 
@@ -339,38 +325,84 @@ impl InboxEntry {
     /// *before* the rate-limit decision to skip duplicates without spending a
     /// model call. A second bounded read is the smaller risk.
     pub fn digest(&self) -> Result<crate::provenance::PayloadDigest, InboxError> {
-        // Same regular-file check as `read_quarantined`: hashing a symlink target
-        // would silently digest a file outside the inbox, and an unbounded read
-        // would allocate whatever the link pointed at.
-        let size = ensure_regular_file(&self.path)?;
-        if size > MAX_PAYLOAD_BYTES {
-            return Err(InboxError::PayloadTooLarge {
-                size,
-                limit: MAX_PAYLOAD_BYTES,
-            });
-        }
-        let bytes = std::fs::read(&self.path).map_err(InboxError::Payload)?;
-        Ok(crate::provenance::PayloadDigest::of(
-            &bytes[..bytes.len().min(MAX_PAYLOAD_BYTES as usize)],
-        ))
+        // Same trusted open as `read_quarantined`: hashing a symlink target
+        // would digest a file outside the inbox, and reading an unbounded path
+        // would allocate whatever was planted there. This runs before the rate
+        // limiter, so it is the read an attacker reaches most often.
+        let bytes = read_payload(&self.path)?;
+        Ok(crate::provenance::PayloadDigest::of(&bytes))
     }
 }
 
-/// Confirm `path` is still a regular file, and report its size.
+/// Read a payload without following a link and without trusting a size observed
+/// a moment earlier.
 ///
-/// `symlink_metadata` does not follow links, so a path that has become a symlink
-/// is rejected rather than read through. The poll performs this check at
-/// admission; repeating it at every later read closes the window between
-/// admission and consumption, without pretending the window can be made zero on
-/// a filesystem other writers can reach.
-fn ensure_regular_file(path: &Path) -> Result<u64, InboxError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(InboxError::Payload)?;
+/// The poll's admission check and this read are separated by time, and the
+/// inbox directory belongs to whoever drops files into it. `symlink_metadata`
+/// followed by `std::fs::read` checks one path and then resolves it again: a
+/// link planted in between turns the read into an arbitrary-file read, and
+/// `std::fs::read` allocates the target's whole size before any truncation.
+///
+/// Opening once with `O_NOFOLLOW` and taking the bounds from the handle makes
+/// the thing measured and the thing read the same object. A path that is not a
+/// regular file, or is too large, is refused before any bytes are read.
+fn read_payload(path: &Path) -> Result<Vec<u8>, InboxError> {
+    use std::io::Read;
+
+    let file = open_payload(path)?;
+    let metadata = file.metadata().map_err(InboxError::Payload)?;
     if !metadata.is_file() {
         return Err(InboxError::Payload(std::io::Error::other(
             "payload is not a regular file; it may have been replaced by a symlink",
         )));
     }
-    Ok(metadata.len())
+    if metadata.len() > MAX_PAYLOAD_BYTES {
+        return Err(InboxError::PayloadTooLarge {
+            size: metadata.len(),
+            limit: MAX_PAYLOAD_BYTES,
+        });
+    }
+    // `take` is the real bound: the file can grow between `metadata` and the
+    // read, and `read_to_end` on an unbounded file would allocate whatever it
+    // grew to.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_PAYLOAD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(InboxError::Payload)?;
+    if bytes.len() as u64 > MAX_PAYLOAD_BYTES {
+        return Err(InboxError::PayloadTooLarge {
+            size: bytes.len() as u64,
+            limit: MAX_PAYLOAD_BYTES,
+        });
+    }
+    Ok(bytes)
+}
+
+/// Open a payload without following a symlink and without blocking on a FIFO.
+#[cfg(unix)]
+fn open_payload(path: &Path) -> Result<std::fs::File, InboxError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        // `O_NOFOLLOW` refuses a symlink at the final component. `O_NONBLOCK`
+        // means a FIFO that replaced the file returns instead of parking the
+        // watcher inside `open`; the type check in `read_payload` then refuses
+        // it. `O_CLOEXEC` keeps a daemon `exec` from inheriting the handle.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(InboxError::Payload)
+}
+
+/// Open a payload on a platform with no `O_NOFOLLOW` in `std`.
+///
+/// The handle's own metadata still bounds the read, but the final component can
+/// be a symlink at the moment of the open. That is the honest limitation of the
+/// Windows path; the Linux path, where the daemon watches directories other
+/// programs write to, is the one that closes the race.
+#[cfg(not(unix))]
+fn open_payload(path: &Path) -> Result<std::fs::File, InboxError> {
+    std::fs::File::open(path).map_err(InboxError::Payload)
 }
 
 /// Move `path` into `root/processed/`, disambiguating a name collision.
@@ -694,13 +726,6 @@ impl Inbox {
         };
 
         for entry in entries.flatten() {
-            // Stop as soon as the bucket is empty. Continuing would re-admit
-            // nothing but would still stat every remaining file, so the flood would
-            // cost a directory walk on every poll forever.
-            if !self.limiter.take() {
-                return;
-            }
-
             let path = entry.path();
             let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
@@ -718,6 +743,14 @@ impl Inbox {
             };
             if !metadata.is_file() || metadata.len() > MAX_PAYLOAD_BYTES {
                 continue;
+            }
+
+            // Take the token only once this entry is known to be promotable.
+            // Taking it first meant one symlink or oversized file in `deferred/`
+            // spent a token on every poll without ever being admitted, starving
+            // everything behind it. The check is cheap and the token is not.
+            if !self.limiter.take() {
+                return;
             }
 
             let destination = self.root.join(file_name);

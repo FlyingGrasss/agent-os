@@ -365,3 +365,86 @@ fn polling_a_removed_root_reports_an_error_rather_than_panicking() {
 
     assert!(matches!(inbox.poll(), Err(InboxError::Directory(_))));
 }
+
+#[test]
+fn the_payload_open_itself_refuses_a_link_even_with_no_prior_check() {
+    // `read_quarantined` used to stat the path and then call `std::fs::read`,
+    // which resolves the path a second time. The property under test is that the
+    // open refuses the link on its own, so a swap in that window has nothing to
+    // redirect. Calling `read_payload` directly models the race: no stat has run
+    // on this path during this call.
+    #[cfg(unix)]
+    {
+        let scratch = Scratch::new("nofollow");
+        let secret = scratch.write("secret.txt", "not for the agent");
+        let link = scratch.0.join("note.txt");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let err = read_payload(&link).expect_err("a symlink must not be followed");
+        assert!(matches!(err, InboxError::Payload(_)));
+    }
+}
+
+#[test]
+fn a_payload_over_the_limit_is_refused_before_it_is_read_whole() {
+    let scratch = Scratch::new("toolarge");
+    let path = scratch.0.join("big.txt");
+    let file = fs::File::create(&path).unwrap();
+    file.set_len(MAX_PAYLOAD_BYTES + 1).unwrap();
+    drop(file);
+
+    let err = read_payload(&path).expect_err("over the limit");
+    match err {
+        InboxError::PayloadTooLarge { size, limit } => {
+            assert_eq!(size, MAX_PAYLOAD_BYTES + 1);
+            assert_eq!(limit, MAX_PAYLOAD_BYTES);
+        }
+        other => panic!("expected PayloadTooLarge, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_directory_is_refused_by_the_payload_open() {
+    let scratch = Scratch::new("dirpayload");
+    let path = scratch.0.join("dir.txt");
+    fs::create_dir_all(&path).unwrap();
+
+    let err = read_payload(&path).expect_err("a directory is not a payload");
+    assert!(matches!(err, InboxError::Payload(_)));
+}
+
+#[test]
+fn an_unusable_deferred_entry_does_not_spend_the_credit() {
+    // `drain_deferred` used to take a token before checking whether the entry
+    // could be promoted, so one oversized (or symlinked) file in `deferred/`
+    // spent every poll's credit without ever being admitted and starved
+    // everything behind it.
+    let scratch = Scratch::new("deferred-starve");
+    let root = scratch.0.join("inbox");
+    fs::create_dir_all(root.join("deferred")).unwrap();
+    let mut inbox =
+        Inbox::with_limits(&root, crate::Limits::per_minute(1, 1)).unwrap();
+
+    let big = root.join("deferred/big.txt");
+    let file = fs::File::create(&big).unwrap();
+    file.set_len(MAX_PAYLOAD_BYTES + 1).unwrap();
+    drop(file);
+
+    let first = inbox.poll().unwrap();
+    assert!(first.ready.is_empty(), "nothing usable is ready yet");
+
+    // With the credit intact this is promoted. If the oversized entry consumed
+    // the token, the queue waits for a refill that will not come in this test.
+    fs::write(root.join("deferred/valid.txt"), "usable").unwrap();
+    let second = inbox.poll().unwrap();
+    assert_eq!(
+        second.ready.len(),
+        1,
+        "the usable entry must be promoted, not starved by the unusable one"
+    );
+    assert!(!root.join("deferred/valid.txt").exists());
+    assert!(
+        root.join("deferred/big.txt").exists(),
+        "the unusable entry is left for a human, not deleted"
+    );
+}

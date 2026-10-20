@@ -852,7 +852,7 @@ mod imp {
             if inner.shutting_down {
                 return;
             }
-            let mut retired = Vec::new();
+            let mut retired: Vec<(Worker, bool)> = Vec::new();
             let mut kept = Vec::new();
             for w in inner.free.drain(..) {
                 let idle_too_long = w.idle_since.elapsed() >= self.config.idle_timeout;
@@ -862,18 +862,27 @@ mod imp {
                 // case (only `terminate` sets it negative), so the checks above
                 // would keep handing the corpse out. `worker_is_dead` closes
                 // that by asking the kernel, through `waitpid(WNOHANG)`, whether
-                // the child has actually exited.
+                // the child has actually exited -- and reaps it when it has.
                 let dead = worker_is_dead(&w);
                 if idle_too_long || served_enough || dead {
-                    retired.push(w);
+                    retired.push((w, dead));
                 } else {
                     kept.push(w);
                 }
             }
             inner.free.extend(kept);
-            for mut w in retired {
+            for (mut w, already_reaped) in retired {
                 inner.live -= 1;
-                terminate(&mut w);
+                if already_reaped {
+                    // `worker_is_dead` called `waitpid`, so this pid is already
+                    // gone. Signalling it now could hit an unrelated process
+                    // that has since been allocated the same number; close the
+                    // socket and forget it instead.
+                    let _ = w.sock.shutdown(std::net::Shutdown::Both);
+                    w.pid = -1;
+                } else {
+                    terminate(&mut w);
+                }
             }
 
             // A replacement that fails to start reduces capacity; it does not
@@ -897,6 +906,25 @@ mod imp {
         /// never on the request path.
         fn spawn_worker(&self) -> Result<Worker, PoolError> {
             let (host, ctl) = socketpair().map_err(PoolError::Spawn)?;
+
+            // A socketpair takes the two lowest free descriptors. If either
+            // landed in 0..=2, the daemon was started with a closed standard
+            // stream, and the child would inherit the parent's end of its own
+            // control socket at that number: the scrub only closes above
+            // `CONTROL_FD`, so it would survive. Holding both ends means the
+            // parent's shutdown no longer produces EOF, and the worker keeps
+            // running. Refuse rather than spawn a worker with that hole.
+            if socketpair_used_stdio(host, ctl) {
+                // SAFETY: both descriptors are owned by this process.
+                unsafe {
+                    libc::close(host);
+                    libc::close(ctl);
+                }
+                return Err(PoolError::Spawn(io::Error::other(
+                    "standard descriptors 0, 1 or 2 are closed; refusing to spawn a \
+                     worker that would inherit the control socket",
+                )));
+            }
 
             // argv and envp are materialised *before* the fork so the child needs
             // no allocation of its own beyond the confinement calls.
@@ -1763,6 +1791,17 @@ mod imp {
         Ok((fds[0], fds[1]))
     }
 
+    /// Whether the socketpair landed on a standard stream.
+    ///
+    /// That can only happen when the daemon was started with fd 0, 1 or 2
+    /// closed. The child would then inherit the *parent's* end of the control
+    /// socket at a number the scrub deliberately keeps, so the check is a
+    /// precondition for the scrub's "only stdio and the control socket survive"
+    /// claim to be true.
+    fn socketpair_used_stdio(host: libc::c_int, ctl: libc::c_int) -> bool {
+        host <= 2 || ctl <= 2
+    }
+
     fn write_all(fd: libc::c_int, mut buf: &[u8]) -> io::Result<()> {
         while !buf.is_empty() {
             // SAFETY: writing `buf.len()` bytes from `buf`, which is live for the
@@ -1817,9 +1856,24 @@ mod imp {
 
     /// Close any descriptors the worker queued that the reply did not account
     /// for, and return how many were closed.
+    ///
+    /// Four things are enforced here, because the sender is the hostile side:
+    ///
+    /// * **`cmsg_len` is checked before `CMSG_DATA` is read.** A payload shorter
+    ///   than one descriptor would otherwise copy padding; the buffer is zeroed,
+    ///   so that reads as fd `0` and this closes the daemon's stdin.
+    /// * **Every descriptor in the message is closed**, not just the first. The
+    ///   kernel installs all of them in this process, and a leaked one is a
+    ///   capability nobody asked for.
+    /// * **`MSG_CTRUNC` is an error.** Truncation means the kernel dropped part
+    ///   of the message, so the count would be an understatement.
+    /// * **The loop is bounded, and EOF ends it.** A worker can send
+    ///   descriptors forever, and `recvmsg` returns `0` -- not `EAGAIN` -- once
+    ///   it closes the socket, which the unbounded version spun on.
     fn drain_stray_fds(fd: libc::c_int) -> io::Result<usize> {
+        const MAX_DRAIN_ROUNDS: usize = 128;
         let mut closed = 0usize;
-        loop {
+        for _ in 0..MAX_DRAIN_ROUNDS {
             let mut byte = [0u8; 1];
             let mut iov = libc::iovec {
                 iov_base: byte.as_mut_ptr() as *mut libc::c_void,
@@ -1845,27 +1899,62 @@ mod imp {
                     _ => return Err(e),
                 }
             }
-            // SAFETY: `msg` describes live locals and `cmsg_buf` is 64 bytes,
-            // which is enough for one `SCM_RIGHTS` header plus one descriptor.
-            unsafe {
-                let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
-                while !cmsg.is_null() {
-                    if (*cmsg).cmsg_level == libc::SOL_SOCKET
-                        && (*cmsg).cmsg_type == libc::SCM_RIGHTS
-                    {
-                        let mut f: libc::c_int = -1;
-                        std::ptr::copy_nonoverlapping(
-                            libc::CMSG_DATA(cmsg),
-                            &mut f as *mut libc::c_int as *mut u8,
-                            std::mem::size_of::<libc::c_int>(),
-                        );
-                        if f >= 0 {
-                            libc::close(f);
-                            closed += 1;
+            if got == 0 {
+                // EOF from a worker that closed after replying. There is nothing
+                // left to drain, and the next call would return zero forever.
+                return Ok(closed);
+            }
+            // Close everything the message carried before deciding whether the
+            // message itself is acceptable.
+            close_message_fds(&msg, &mut closed);
+            if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stray control message was truncated; some descriptors were dropped",
+                ));
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "worker kept sending descriptors after its reply",
+        ))
+    }
+
+    /// Close every descriptor in an `SCM_RIGHTS` control message.
+    ///
+    /// Split out so both the normal drain and the truncated path close what they
+    /// received instead of returning an error with the descriptors still open.
+    fn close_message_fds(msg: &libc::msghdr, closed: &mut usize) {
+        // SAFETY: `msg` describes a control buffer that is live for the duration
+        // of the call. `cmsg_len` is checked before the payload is read, so a
+        // short header cannot make `CMSG_DATA` copy past its message.
+        unsafe {
+            let mut cmsg = libc::CMSG_FIRSTHDR(msg);
+            while !cmsg.is_null() {
+                if (*cmsg).cmsg_level == libc::SOL_SOCKET
+                    && (*cmsg).cmsg_type == libc::SCM_RIGHTS
+                {
+                    let header = libc::CMSG_LEN(0) as usize;
+                    let len = (*cmsg).cmsg_len as usize;
+                    if len >= header {
+                        let count =
+                            (len - header) / std::mem::size_of::<libc::c_int>();
+                        let data = libc::CMSG_DATA(cmsg);
+                        for i in 0..count {
+                            let mut f: libc::c_int = -1;
+                            std::ptr::copy_nonoverlapping(
+                                data.add(i * std::mem::size_of::<libc::c_int>()),
+                                &mut f as *mut libc::c_int as *mut u8,
+                                std::mem::size_of::<libc::c_int>(),
+                            );
+                            if f >= 0 {
+                                libc::close(f);
+                                *closed += 1;
+                            }
                         }
                     }
-                    cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
                 }
+                cmsg = libc::CMSG_NXTHDR(msg, cmsg);
             }
         }
     }
@@ -2004,6 +2093,17 @@ fn reap_pid(pid: libc::pid_t) {
         }
 
         #[test]
+        fn a_socketpair_on_a_standard_stream_is_refused_by_the_spawn_guard() {
+            // The guard exists so `spawn_worker` never produces a child that
+            // inherits the parent's end of the control socket at 0, 1 or 2.
+            assert!(!socketpair_used_stdio(3, 4));
+            assert!(!socketpair_used_stdio(4, 3));
+            assert!(socketpair_used_stdio(0, 4));
+            assert!(socketpair_used_stdio(4, 1));
+            assert!(socketpair_used_stdio(4, 2));
+        }
+
+        #[test]
         fn the_walk_reports_a_descriptor_that_is_open() {
             let file = std::fs::File::open("/proc/self/status").unwrap();
             let wanted = file.as_raw_fd();
@@ -2013,6 +2113,123 @@ fn reap_pid(pid: libc::pid_t) {
                 seen.contains(&wanted),
                 "the walk missed an open descriptor ({wanted}): {seen:?}"
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod stray_fd_tests {
+        use super::*;
+        use std::os::fd::AsRawFd;
+
+        fn pair() -> (libc::c_int, libc::c_int) {
+            let mut fds = [0 as libc::c_int; 2];
+            let rc = unsafe {
+                libc::socketpair(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                    0,
+                    fds.as_mut_ptr(),
+                )
+            };
+            assert_eq!(rc, 0, "socketpair: {}", std::io::Error::last_os_error());
+            (fds[0], fds[1])
+        }
+
+        fn send_fds(socket: libc::c_int, fds: &[libc::c_int]) {
+            let byte = [1u8];
+            let mut iov = libc::iovec {
+                iov_base: byte.as_ptr() as *mut libc::c_void,
+                iov_len: 1,
+            };
+            let mut cmsg_buf = [0u8; 256];
+            let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+            let payload = std::mem::size_of_val(fds) as u32;
+            msg.msg_controllen = unsafe { libc::CMSG_SPACE(payload) as _ };
+            unsafe {
+                let cmsg = libc::CMSG_FIRSTHDR(&msg);
+                assert!(!cmsg.is_null());
+                (*cmsg).cmsg_level = libc::SOL_SOCKET;
+                (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+                (*cmsg).cmsg_len = libc::CMSG_LEN(payload) as _;
+                let data = libc::CMSG_DATA(cmsg);
+                for (i, fd) in fds.iter().enumerate() {
+                    std::ptr::copy_nonoverlapping(
+                        fd as *const libc::c_int as *const u8,
+                        data.add(i * std::mem::size_of::<libc::c_int>()),
+                        std::mem::size_of::<libc::c_int>(),
+                    );
+                }
+                let sent = libc::sendmsg(socket, &msg, 0);
+                assert_eq!(
+                    sent,
+                    1,
+                    "sendmsg: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        #[test]
+        fn a_two_descriptor_stray_message_closes_both() {
+            // The kernel installs every descriptor in the message before this
+            // function runs. Closing only the first leaves the second open in
+            // the daemon, which is a capability nobody asked for.
+            let (a, b) = pair();
+            let first = std::fs::File::open("/proc/self/status").unwrap();
+            let second = std::fs::File::open("/proc/self/maps").unwrap();
+            let (f1, f2) = (first.as_raw_fd(), second.as_raw_fd());
+
+            send_fds(a, &[f1, f2]);
+            let closed = drain_stray_fds(b).expect("drain");
+
+            assert_eq!(closed, 2, "both stray descriptors must be closed");
+            // The originals belong to this test and must still be open.
+            assert!(unsafe { libc::fcntl(f1, libc::F_GETFD) } >= 0);
+            assert!(unsafe { libc::fcntl(f2, libc::F_GETFD) } >= 0);
+
+            unsafe {
+                libc::close(a);
+                libc::close(b);
+            }
+        }
+
+        #[test]
+        fn a_closed_sender_ends_the_drain_instead_of_spinning() {
+            // `recvmsg` returns 0 at EOF, not EAGAIN. The unbounded loop treated
+            // that as "nothing to do, try again" and never returned.
+            let (a, b) = pair();
+            unsafe {
+                libc::close(a);
+            }
+            let closed = drain_stray_fds(b).expect("drain at EOF");
+            assert_eq!(closed, 0);
+            unsafe {
+                libc::close(b);
+            }
+        }
+
+        #[test]
+        fn a_truncated_stray_message_is_an_error_not_an_undercount() {
+            // More descriptors than the 64-byte control buffer can hold. The
+            // kernel sets MSG_CTRUNC and drops the excess; reporting the ones
+            // that fit as if they were all of them would hide the attempt.
+            let (a, b) = pair();
+            let files: Vec<std::fs::File> = (0..20)
+                .map(|_| std::fs::File::open("/proc/self/status").unwrap())
+                .collect();
+            let fds: Vec<libc::c_int> = files.iter().map(|f| f.as_raw_fd()).collect();
+
+            send_fds(a, &fds);
+            let err = drain_stray_fds(b).expect_err("truncation must be reported");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+            unsafe {
+                libc::close(a);
+                libc::close(b);
+            }
         }
     }
 }

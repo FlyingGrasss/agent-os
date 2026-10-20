@@ -9,3 +9,8 @@ license.workspace = true
 agentos-types = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` for the inbox's payload open. The Windows path in `inbox.rs`
+# explains why it cannot close the same race there.
+libc = "0.2"

@@ -75,6 +75,7 @@ name = "agentos-events"
 version = "0.1.0"
 dependencies = [
  "agentos-types",
+ "libc",
  "serde",
  "thiserror 2.0.21",
 ]
