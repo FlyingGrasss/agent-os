@@ -36,7 +36,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use agentos_cli::{ask_on_stdin, Decision, client::{dispatch, check, ExecuteParams, Grants, Client, discover_endpoint, DaemonEndpoint, AuthToken}, repl::{Repl, ReplExit}, util::user_id};
+use agentos_cli::{ask_on_stdin, Decision, client::{dispatch, DispatchError, check, ExecuteParams, Grants, Client, discover_endpoint, DaemonEndpoint, AuthToken}, repl::{Repl, ReplExit}, util::user_id};
 use agentos_core::{ModelExtractor, Outcome, Planner, PlanOutcome, Session};
 use agentos_dsl::PlanError;
 use agentos_infer::{Ollama, RoleModels};
@@ -226,14 +226,22 @@ fn cmd_run(args: &[String]) -> Result<std::process::ExitCode, String> {
         timeout_secs: 300,
     };
 
-    // Try to dispatch to the daemon first
+    // Try to dispatch to the daemon first.
     match dispatch(grants) {
         Ok(code) => return Ok(code),
-        Err(e) => eprintln!("agentos: daemon error: {}", e),
+        Err(DispatchError::Unreachable(e)) => {
+            eprintln!("agentos: daemon not reachable: {e}");
+        }
+        Err(DispatchError::Failed(e)) => {
+            // The daemon answered. It is the authority for this task, and its
+            // ceiling is the operator's. Running locally instead would both
+            // bypass that ceiling and execute the task a second time.
+            return Err(format!("daemon error: {e}"));
+        }
     }
 
-    // Fall back to local execution if daemon is not reachable
-    eprintln!("agentos: daemon not reachable, falling back to local execution");
+    // Only a genuinely unreachable daemon falls through to local execution.
+    eprintln!("agentos: falling back to local execution");
     cmd_run_local(args)
 }
 
@@ -292,7 +300,7 @@ fn cmd_repl(args: &[String]) -> Result<std::process::ExitCode, String> {
         None
     };
 
-    let client = Client::connect(endpoint, token)?;
+    let client = Client::connect(endpoint, token).map_err(|e| e.to_string())?;
 
     // Print the endpoint we're using
     match client.endpoint_str() {
@@ -712,9 +720,17 @@ fn service_exists_user() -> Result<bool, String> {
 }
 
 fn run_systemctl(systemctl: &str, args: &[String]) -> Result<(), String> {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(format!("{} {}", systemctl, args.join(" ")));
-    
+    // No shell. `systemctl` is either "systemctl" or "sudo systemctl": a program
+    // plus one argument, not a command line to interpolate. Building a shell
+    // command here re-introduced exactly the execution surface the rest of this
+    // program refuses, and `args.join(" ")` would start splitting on whitespace
+    // the moment any argument was not a compile-time constant.
+    let mut parts = systemctl.split_whitespace();
+    let program = parts.next().ok_or("empty systemctl command")?;
+    let mut cmd = Command::new(program);
+    cmd.args(parts);
+    cmd.args(args);
+
     let status = cmd.status().map_err(|e| format!("failed to run systemctl: {e}"))?;
     
     if !status.success() {

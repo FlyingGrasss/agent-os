@@ -107,24 +107,25 @@ impl<'a> Disclosure<'a> {
         Ok(resolutions)
     }
 
-    /// Promote a value the user just saw and approved.
+    /// Promote the value the user just saw for one flagged argument.
     ///
-    /// Takes the value by reference and mints the token from the same bytes the
-    /// caller displayed. If the caller displays one value and passes another,
-    /// the digest check in `Trusted::confirmed` fails and this returns an error
-    /// rather than promoting the wrong thing.
+    /// `arg` names the argument the caller displayed, and `shown` must be the
+    /// value the policy engine flagged for that argument. That comparison is the
+    /// one that makes the token mean something: without it, the digest below is
+    /// circular -- minted from `shown` and verified against `shown` -- and proves
+    /// only that the token matches itself. The user approves *bytes the engine
+    /// asked about*, not whatever a caller passes here afterwards.
     ///
     /// `pending` must be a request this `Disclosure` drained and the user
     /// approved. That argument is not decoration: it is what makes promotion
     /// require a policy decision that put the value in a `Confirm` position.
     /// Without it, any caller holding a tainted `Val` could mint a `Trusted` from
     /// it — no host, no engine, no audit entry, no user — and that value would be
-    /// indistinguishable from an approved one everywhere downstream. Harmless
-    /// while nothing consumes a promoted value, which is the case today, and a
-    /// live hole the moment a resumed plan runs a tool with one.
+    /// indistinguishable from an approved one everywhere downstream.
     pub fn approve(
         &self,
         pending: &PendingConfirmation,
+        arg: &str,
         shown: &Val<PlanData>,
     ) -> Result<Trusted<PlanData>, PlanError> {
         if !self.approved.iter().any(|p| p == pending) {
@@ -135,6 +136,33 @@ impl<'a> Disclosure<'a> {
                     .into(),
             });
         }
+
+        // Bind the promotion to the flagged argument. Without this, the digest
+        // below is circular: minted from `shown` and verified against `shown`,
+        // proving only that the token matches itself.
+        let expected = pending.arg(arg).ok_or_else(|| PlanError::ToolRejected {
+            tool: "confirmation".into(),
+            reason: format!(
+                "`{arg}` was not an argument the policy engine flagged for this request"
+            ),
+        })?;
+
+        // Comparing the payload (not the label) is deliberate: the caller may
+        // have reconstructed the same bytes, and what matters is that they are
+        // the bytes the engine asked about and the user saw.
+        let same_bytes = shown.with_label_for_display(|shown, _| {
+            expected.with_label_for_display(|expected, _| shown == expected)
+        });
+        if !same_bytes {
+            return Err(PlanError::ToolRejected {
+                tool: "confirmation".into(),
+                reason: format!(
+                    "the value shown for `{arg}` is not the value the policy engine flagged: \
+                     approval must name the bytes that were displayed"
+                ),
+            });
+        }
+
         let confirmation = Confirmation::issued_by_controller(self.user, shown)
             .map_err(|e| PlanError::ToolRejected {
                 tool: "confirmation".into(),

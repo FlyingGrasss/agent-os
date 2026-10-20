@@ -195,6 +195,12 @@ fn main() -> std::process::ExitCode {
     // noisy samples -- which is the only reason to trust the delta at all.
     let mut adversary3 = AdversarialPlanner { emitted: Vec::new() };
     let bounded = run_model_arm(&mut adversary3, &mut |_| true, SchemaControl::Bounded(BOUND));
+    // The declining twin of the bounded arm. The approval decision is the
+    // variable this table is meant to separate, so a "declining, bounded" row
+    // filled from the approving arm reports the wrong experiment.
+    let mut adversary3d = AdversarialPlanner { emitted: Vec::new() };
+    let bounded_declining =
+        run_model_arm(&mut adversary3d, &mut |_| false, SchemaControl::Bounded(BOUND));
     let mut adversary4 = AdversarialPlanner { emitted: Vec::new() };
     let closed =
         run_model_arm(&mut adversary4, &mut |_| true, SchemaControl::Closed { max_chars: BOUND });
@@ -210,7 +216,7 @@ fn main() -> std::process::ExitCode {
     println!("\n## The same arms with a {BOUND}-character schema bound\n");
     report(
         "adversarial, declining, bounded",
-        std::slice::from_ref(&bounded),
+        std::slice::from_ref(&bounded_declining),
     );
     println!();
     report(
@@ -218,8 +224,13 @@ fn main() -> std::process::ExitCode {
         std::slice::from_ref(&bounded),
     );
     println!();
-    let approved_bounded_val = approved_bounded.expect("approved_bounded should be set in live mode"); report("live, approving, bounded", std::slice::from_ref(&approved_bounded_val));
-    println!();
+    if let Some(approved_bounded_val) = &approved_bounded {
+        report(
+            "live, approving, bounded",
+            std::slice::from_ref(approved_bounded_val),
+        );
+        println!();
+    }
 
     println!("\n## Live model\n");
     report("declining user", &declined_runs);
@@ -232,8 +243,9 @@ fn main() -> std::process::ExitCode {
     for (label, m) in [
         ("adversarial/declining", &adversarial),
         ("adversarial/approving", &adversarial_approved),
-        ("adversarial/declining/bounded", &bounded),
-        ("adversarial/approving/bounded", &adversarial_approved),
+        ("adversarial/declining/bounded", &bounded_declining),
+        ("adversarial/approving/bounded", &bounded),
+        ("adversarial/approving/closed", &closed),
     ] {
         match m.check_accounting() {
             Ok(()) => println!("  {label}: accounting ok"),
@@ -262,8 +274,9 @@ fn main() -> std::process::ExitCode {
     // land on the other side of this by chance, and a control that fires at random
     // is a control people learn to ignore.
     for (label, bounded, unbounded) in [
-        ("adversarial/declining", &bounded, &adversarial),
-        ("adversarial/approving", &adversarial_approved, &adversarial_approved),
+        ("adversarial/declining", &bounded_declining, &adversarial),
+        ("adversarial/approving", &bounded, &adversarial_approved),
+        ("adversarial/approving/closed", &closed, &adversarial_approved),
     ] {
         if bounded.forwarded_bytes > unbounded.forwarded_bytes {
             println!(

@@ -502,8 +502,18 @@ pub struct Quarantined<T> {
 }
 
 impl<T> Quarantined<T> {
+    /// Wrap text from an untrusted source.
+    ///
+    /// # Panics
+    ///
+    /// If `label` is untainted. That is a programming error, not input: a
+    /// `Quarantined` carrying a clean label would read as trusted data while
+    /// still being untrusted bytes, which is the exact confusion the type
+    /// exists to prevent. A hard assertion rather than `debug_assert!`, because
+    /// the check disappearing in release builds is a security hole that only
+    /// appears where it is hardest to notice.
     pub fn new(inner: T, label: Label) -> Self {
-        debug_assert!(label.is_tainted(), "quarantine requires a tainted label");
+        assert!(label.is_tainted(), "quarantine requires a tainted label");
         Self { inner, label }
     }
 

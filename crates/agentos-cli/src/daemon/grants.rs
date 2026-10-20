@@ -142,11 +142,19 @@ impl Ceiling {
 
     /// Narrow write roots.
     ///
-    /// Each requested root must be *inside* a configured root. Containment is
-    /// checked on path components, not on string prefixes: on Windows
-    /// `"C:\outbox-evil"` starts with `"C:\outbox"` as a string but is a
+    /// Each requested root must be *inside* a configured root, after both have
+    /// been resolved.
+    ///
+    /// Containment is checked on path components, not on string prefixes: on
+    /// Windows `"C:\outbox-evil"` starts with `"C:\outbox"` as a string but is a
     /// different directory, and a prefix test would hand out write access to it.
     /// `Path::starts_with` compares components, so it does not have that bug.
+    ///
+    /// Components, however, are still lexical. `..` is a component, so
+    /// `/srv/outbox/../etc` passes a `starts_with("/srv/outbox")` test and then
+    /// resolves to `/etc` when the grant canonicalises it. The check therefore
+    /// runs on the *resolved* path: check the spelling and grant the resolution,
+    /// and the two can disagree.
     fn narrow_write(&self, requested: &[String]) -> Result<Option<WriteGrant>, GrantError> {
         if requested.is_empty() {
             return Ok(None);
@@ -156,13 +164,49 @@ impl Ceiling {
         // would be strictly more authority than either half asked for.
         let raw = &requested[0];
         let wanted = PathBuf::from(raw);
-        if !self.write_roots.iter().any(|root| wanted.starts_with(root)) {
+
+        // Resolve before comparing. `Path::starts_with` is lexical, so
+        // `/srv/outbox/../etc` passes a containment test against `/srv/outbox`
+        // and then resolves to `/etc` when the grant canonicalises it. The
+        // containment check has to see the path that will actually be granted.
+        let resolved = match std::fs::canonicalize(&wanted) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                // The path does not exist, so it cannot be granted: `WriteGrant`
+                // requires a real directory. Report the kind of failure that is
+                // useful rather than "could not resolve" for a path that was
+                // never going to be allowed. No grant is created on this branch.
+                let lexically_inside = self
+                    .write_roots
+                    .iter()
+                    .any(|root| wanted.starts_with(root));
+                return if lexically_inside {
+                    Err(GrantError::ConfigurationInvalid {
+                        detail: format!("write root {raw} cannot be resolved: {e}"),
+                    })
+                } else {
+                    Err(GrantError::WriteRootOutside {
+                        requested: raw.clone(),
+                    })
+                };
+            }
+        };
+
+        // Resolve the configured roots too, so a root reached through a symlink
+        // does not reject a legitimate request for one of its subdirectories.
+        let inside = self.write_roots.iter().any(|root| {
+            std::fs::canonicalize(root)
+                .map(|root| resolved.starts_with(root))
+                .unwrap_or(false)
+        });
+        if !inside {
             return Err(GrantError::WriteRootOutside { requested: raw.clone() });
         }
+
         // Scope to the *requested* path, not the configured root. Granting the
         // root would answer a request for a subdirectory with its parent, which is
         // a widening in the one direction this file forbids.
-        WriteGrant::new(&wanted)
+        WriteGrant::new(&resolved)
             .map(Some)
             .map_err(|e| GrantError::ConfigurationInvalid { detail: e.to_string() })
     }

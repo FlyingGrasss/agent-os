@@ -387,10 +387,15 @@ fn plan_display(data: &PlanData) -> Option<String> {
 /// range. Tab and newline are kept because they are ordinary text in an address or
 /// a note, and dropping them would misrepresent the value; everything else becomes
 /// U+FFFD so the string's length is preserved and nothing is silently lost.
+///
+/// Carriage return is *not* kept. It is a C0 control, and on a terminal `\r`
+/// returns the cursor to column zero, so `\r` followed by text overwrites what is
+/// already on the line -- a log line or a confirmation prompt could be made to
+/// read as something other than what was recorded.
 pub fn sanitise_for_display(text: &str) -> String {
     text.chars()
         .map(|c| match c {
-            '\t' | '\n' | '\r' => c,
+            '\t' | '\n' => c,
             c if (c as u32) < 0x20 || c as u32 == 0x7f => '\u{fffd}',
             c if (0x80..=0x9f).contains(&(c as u32)) => '\u{fffd}',
             c => c,

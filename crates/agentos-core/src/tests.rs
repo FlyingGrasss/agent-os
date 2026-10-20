@@ -145,7 +145,7 @@ fn approval_promotes_exactly_the_value_that_was_shown() {
     let pending = disclosure.approved_request().expect("the approved request");
 
     let approved = disclosure
-        .approve(pending, &shown_value)
+        .approve(pending, "to", &shown_value)
         .expect("approval should succeed");
     assert_eq!(approved.get().as_text().as_deref(), Some("evil@example.com"));
     assert_eq!(approved.approval(), agentos_types::Approval::Confirmed);
@@ -189,6 +189,42 @@ fn a_confirmation_for_one_value_does_not_authorise_another() {
     let err = agentos_types::Trusted::confirmed(different, &confirmation)
         .expect_err("a confirmation must not transfer to another value");
     assert!(matches!(err, agentos_types::ConfirmationError::DigestMismatch));
+}
+
+#[test]
+fn a_promotion_must_name_the_value_the_engine_flagged() {
+    // The digest alone cannot catch a substitution: it is minted from `shown`
+    // and verified against `shown`, so any bytes verify against themselves.
+    // Binding the promotion to the flagged argument is what makes approval
+    // about the value the user was shown.
+    let _counters = counters_guard();
+    let sink = MemorySink::new();
+    let (spy, _calls) = Spy::new("send_email");
+    let mut host = host_with(Box::new(spy), &sink);
+
+    let mut args = BTreeMap::new();
+    args.insert("to".to_string(), tainted_recipient("boss@example.com"));
+    let _ = host.call("send_email", &args);
+
+    let mut disclosure = Disclosure::new(user(), &mut host);
+    disclosure.drain(|_| true).expect("drain");
+    let pending = disclosure.approved_request().expect("the approved request");
+
+    let substituted = tainted_recipient("attacker@example.com");
+    let err = disclosure
+        .approve(pending, "to", &substituted)
+        .expect_err("approving different bytes than the engine flagged must fail");
+    assert!(
+        format!("{err}").contains("not the value the policy engine flagged"),
+        "unexpected error: {err}"
+    );
+
+    // The genuine value still promotes, so the check rejects substitution rather
+    // than every approval.
+    let genuine = tainted_recipient("boss@example.com");
+    disclosure
+        .approve(pending, "to", &genuine)
+        .expect("the flagged value must still promote");
 }
 
 #[test]
@@ -296,7 +332,7 @@ fn a_promoted_value_records_who_vouched_for_it() {
     let pending = disclosure.approved_request().unwrap();
 
     let v = tainted_recipient(PAYLOAD);
-    let t = disclosure.approve(pending, &v).unwrap();
+    let t = disclosure.approve(pending, "to", &v).unwrap();
     assert_eq!(t.origin(), agentos_types::Origin::User(user()));
     assert_eq!(t.approval(), agentos_types::Approval::Confirmed);
 }

@@ -251,17 +251,40 @@ impl Write for ClientStream {
     }
 }
 
+/// Why [`Client::connect`] failed.
+///
+/// The distinction is load-bearing. `Unreachable` means nothing was listening,
+/// so running the task locally is an honest fallback. `Refused` means something
+/// *was* listening and declined, or a credential needed to talk to it was
+/// missing; falling back in that case would execute the task outside the
+/// operator's configured ceiling and could run it twice.
+#[derive(Debug)]
+pub enum ConnectError {
+    /// No daemon answered at the endpoint.
+    Unreachable(String),
+    /// The daemon answered and refused, or the client could not authenticate.
+    Refused(String),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectError::Unreachable(e) | ConnectError::Refused(e) => f.write_str(e),
+        }
+    }
+}
+
 impl Client {
     /// Connect to the daemon and authenticate if needed.
-    pub fn connect(endpoint: DaemonEndpoint, token: Option<AuthToken>) -> Result<Self, String> {
+    pub fn connect(endpoint: DaemonEndpoint, token: Option<AuthToken>) -> Result<Self, ConnectError> {
         let needs_auth = matches!(endpoint, DaemonEndpoint::Tcp(_));
 
         if needs_auth && token.is_none() {
-            return Err(
+            return Err(ConnectError::Refused(
                 "the daemon requires authentication on TCP, but no token was provided\n\
                  (run the daemon with a Unix socket to avoid this, or provide the token)"
                     .to_string(),
-            );
+            ));
         }
 
         eprintln!("agentos: connecting to {}", match &endpoint {
@@ -273,28 +296,37 @@ impl Client {
             #[cfg(unix)]
             DaemonEndpoint::Unix(path) => {
                 let stream = UnixStream::connect(path).map_err(|e| {
-                    format!(
+                    ConnectError::Unreachable(format!(
                         "could not connect to daemon at {}: {}",
                         path.display(),
                         e
-                    )
+                    ))
                 })?;
                 ClientStream::Unix(stream)
             }
             #[cfg(not(unix))]
             DaemonEndpoint::Unix(_) => {
-                return Err("Unix sockets are not supported on this platform".to_string());
+                // Nothing local to talk to on this platform; the caller may
+                // legitimately fall back to running in-process.
+                return Err(ConnectError::Unreachable(
+                    "Unix sockets are not supported on this platform".to_string(),
+                ));
             }
             DaemonEndpoint::Tcp(addr) => {
                 let stream = TcpStream::connect_timeout(addr, Duration::from_secs(5)).map_err(|e| {
-                    format!(
+                    ConnectError::Unreachable(format!(
                         "could not connect to daemon at {}: {}",
                         addr,
                         e
-                    )
+                    ))
                 })?;
-                stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-                stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
+                // Not 30s: the daemon accepts tasks with a timeout up to
+                // `MAX_TASK_SECONDS` (one hour), and a client that gives up after
+                // 30 seconds turns every slow-but-legal task into a spurious
+                // failure. The extra 30s covers framing and shutdown.
+                let timeout = Duration::from_secs(crate::daemon::protocol::MAX_TASK_SECONDS + 30);
+                stream.set_read_timeout(Some(timeout)).ok();
+                stream.set_write_timeout(Some(timeout)).ok();
                 ClientStream::Tcp(stream)
             }
         };
@@ -303,9 +335,13 @@ impl Client {
 
         let mut client = Self { stream, endpoint };
 
-        // Authenticate on TCP
+        // Authenticate on TCP. A refusal here is not "unreachable": the daemon
+        // is running and has made a decision, so the caller must not route
+        // around it.
         if needs_auth {
-            client.authenticate(token.unwrap())?;
+            client
+                .authenticate(token.unwrap())
+                .map_err(ConnectError::Refused)?;
         }
 
         Ok(client)
@@ -373,8 +409,11 @@ impl Client {
             ));
         }
 
-        let result: TaskOutcome = serde_json::from_value(resp.result.unwrap())
-            .map_err(|e| format!("failed to parse task result: {e}"))?;
+        let result: TaskOutcome = serde_json::from_value(
+            resp.result
+                .ok_or_else(|| "the daemon reported success but sent no result".to_string())?,
+        )
+        .map_err(|e| format!("failed to parse task result: {e}"))?;
         Ok(result)
     }
 
@@ -397,8 +436,11 @@ impl Client {
             ));
         }
 
-        let info: Info = serde_json::from_value(resp.result.unwrap())
-            .map_err(|e| format!("failed to parse info: {e}"))?;
+        let info: Info = serde_json::from_value(
+            resp.result
+                .ok_or_else(|| "the daemon reported success but sent no result".to_string())?,
+        )
+        .map_err(|e| format!("failed to parse info: {e}"))?;
         Ok(info)
     }
 
@@ -475,18 +517,71 @@ pub fn render_outcome(result: TaskOutcome) -> String {
     }
 }
 
+/// Why a [`dispatch`] attempt failed.
+///
+/// The distinction decides whether the caller may run the task locally.
+#[derive(Debug)]
+pub enum DispatchError {
+    /// No daemon answered. Running the task in-process is a legitimate fallback.
+    Unreachable(String),
+    /// The daemon was reached and refused, or the request failed while it was the
+    /// authority. Falling back here would bypass the operator's ceiling and could
+    /// run the task a second time.
+    Failed(String),
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DispatchError::Unreachable(e) | DispatchError::Failed(e) => f.write_str(e),
+        }
+    }
+}
+
+/// Whether anything is listening at `endpoint`.
+///
+/// Used only to disambiguate a missing token file, which can mean either "no
+/// daemon has ever run here" or "a daemon is running and this client has no
+/// credential". The probe opens and immediately closes a connection; the daemon
+/// sees EOF before a frame, which is what a client that changes its mind looks
+/// like.
+fn endpoint_is_listening(endpoint: &DaemonEndpoint) -> bool {
+    match endpoint {
+        #[cfg(unix)]
+        DaemonEndpoint::Unix(path) => std::os::unix::net::UnixStream::connect(path).is_ok(),
+        #[cfg(not(unix))]
+        DaemonEndpoint::Unix(_) => false,
+        DaemonEndpoint::Tcp(addr) => {
+            std::net::TcpStream::connect_timeout(addr, Duration::from_millis(500)).is_ok()
+        }
+    }
+}
+
 /// Send a request over the wire and print the outcome.
 ///
 /// Returns the exit code the CLI should use.
-pub fn dispatch(params: ProtoExecuteParams) -> Result<std::process::ExitCode, String> {
+pub fn dispatch(params: ProtoExecuteParams) -> Result<std::process::ExitCode, DispatchError> {
     let endpoint = discover_endpoint();
     let token = if matches!(endpoint, DaemonEndpoint::Tcp(_)) {
-        Some(AuthToken::read()?)
+        match AuthToken::read() {
+            Ok(token) => Some(token),
+            Err(e) => {
+                // A missing token file is ambiguous on its own. Ask the endpoint.
+                return Err(if endpoint_is_listening(&endpoint) {
+                    DispatchError::Failed(e)
+                } else {
+                    DispatchError::Unreachable(e)
+                });
+            }
+        }
     } else {
         None
     };
 
-    let mut client = Client::connect(endpoint, token)?;
+    let mut client = Client::connect(endpoint, token).map_err(|e| match e {
+        ConnectError::Unreachable(e) => DispatchError::Unreachable(e),
+        ConnectError::Refused(e) => DispatchError::Failed(e),
+    })?;
 
     // Print the endpoint we're using
     match &client.endpoint {
@@ -494,7 +589,7 @@ pub fn dispatch(params: ProtoExecuteParams) -> Result<std::process::ExitCode, St
         DaemonEndpoint::Tcp(a) => eprintln!("agentos: connected via TCP {}", a),
     }
 
-    let result = client.execute(params)?;
+    let result = client.execute(params).map_err(DispatchError::Failed)?;
     let exit_code = match &result {
         TaskOutcome::Completed { .. } => std::process::ExitCode::SUCCESS,
         TaskOutcome::Refused { .. } => std::process::ExitCode::from(3),
@@ -521,7 +616,7 @@ pub fn check() -> Result<std::process::ExitCode, String> {
         None
     };
 
-    let mut client = Client::connect(endpoint, token)?;
+    let mut client = Client::connect(endpoint, token).map_err(|e| e.to_string())?;
 
     eprint!("AgentOS daemon status\n\n");
     match &client.endpoint {
@@ -581,8 +676,12 @@ impl crate::repl::Transport for Client {
         } else {
             None
         };
-        *self = Client::connect(self.endpoint.clone(), token)
-            .map_err(crate::repl::TransportError::Disconnected)?;
+        *self = Client::connect(self.endpoint.clone(), token).map_err(|e| match e {
+            ConnectError::Unreachable(message) => crate::repl::TransportError::Disconnected(message),
+            // A refusal is a decision, not a transient outage. Retrying the same
+            // credential would loop forever.
+            ConnectError::Refused(message) => crate::repl::TransportError::Refused(message),
+        })?;
         Ok(())
     }
 }

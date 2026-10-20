@@ -265,9 +265,13 @@ impl InboxEntry {
     pub fn read_quarantined(&self) -> Result<Quarantined<String>, InboxError> {
         // Re-check the size rather than trusting `observed_size`. A file that grew
         // since the poll is a different file from the one the watcher approved.
-        let current = std::fs::symlink_metadata(&self.path)
-            .map_err(InboxError::Payload)?
-            .len();
+        //
+        // `ensure_regular_file` uses `symlink_metadata`, so a path that has become
+        // a symlink is refused rather than followed. Checking only the length and
+        // then calling `read` would read the *target* of a link planted between
+        // the poll and this call, turning the inbox into a way to read files the
+        // user never put in it.
+        let current = ensure_regular_file(&self.path)?;
         if current > MAX_PAYLOAD_BYTES {
             return Err(InboxError::PayloadTooLarge {
                 size: current,
@@ -335,11 +339,38 @@ impl InboxEntry {
     /// *before* the rate-limit decision to skip duplicates without spending a
     /// model call. A second bounded read is the smaller risk.
     pub fn digest(&self) -> Result<crate::provenance::PayloadDigest, InboxError> {
+        // Same regular-file check as `read_quarantined`: hashing a symlink target
+        // would silently digest a file outside the inbox, and an unbounded read
+        // would allocate whatever the link pointed at.
+        let size = ensure_regular_file(&self.path)?;
+        if size > MAX_PAYLOAD_BYTES {
+            return Err(InboxError::PayloadTooLarge {
+                size,
+                limit: MAX_PAYLOAD_BYTES,
+            });
+        }
         let bytes = std::fs::read(&self.path).map_err(InboxError::Payload)?;
         Ok(crate::provenance::PayloadDigest::of(
             &bytes[..bytes.len().min(MAX_PAYLOAD_BYTES as usize)],
         ))
     }
+}
+
+/// Confirm `path` is still a regular file, and report its size.
+///
+/// `symlink_metadata` does not follow links, so a path that has become a symlink
+/// is rejected rather than read through. The poll performs this check at
+/// admission; repeating it at every later read closes the window between
+/// admission and consumption, without pretending the window can be made zero on
+/// a filesystem other writers can reach.
+fn ensure_regular_file(path: &Path) -> Result<u64, InboxError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(InboxError::Payload)?;
+    if !metadata.is_file() {
+        return Err(InboxError::Payload(std::io::Error::other(
+            "payload is not a regular file; it may have been replaced by a symlink",
+        )));
+    }
+    Ok(metadata.len())
 }
 
 /// Move `path` into `root/processed/`, disambiguating a name collision.
@@ -678,14 +709,22 @@ impl Inbox {
                 continue;
             }
 
+            // Only a regular file may be promoted back into the watched root. A
+            // symlink planted in `deferred/` would otherwise be renamed into the
+            // inbox and then read through, which is the same escape as putting the
+            // link there in the first place.
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() > MAX_PAYLOAD_BYTES {
+                continue;
+            }
+
             let destination = self.root.join(file_name);
             if std::fs::rename(&path, &destination).is_err() {
                 continue;
             }
 
-            let Ok(metadata) = std::fs::symlink_metadata(&destination) else {
-                continue;
-            };
             let size = metadata.len();
             live.insert(destination.clone(), size);
 

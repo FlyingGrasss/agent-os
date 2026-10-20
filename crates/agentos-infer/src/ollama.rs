@@ -166,10 +166,16 @@ impl Ollama {
             },
             None => rest.split(['/', ':']).next().unwrap_or_default(),
         };
-        matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1")
-            // The whole 127/8 range, not just 127.0.0.1, so an operator using a
-            // different loopback address is not pushed toward a routable one.
-            || host.starts_with("127.")
+        // Parse rather than test a string prefix. `starts_with("127.")` accepts
+        // `127.0.0.1.example.com`, which is a routable name an attacker can own.
+        // `IpAddr::is_loopback` accepts exactly `127.0.0.0/8` and `::1`.
+        if host.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        bare.parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
     }
 
     /// Flatten a conversation into the `messages` array Ollama expects.

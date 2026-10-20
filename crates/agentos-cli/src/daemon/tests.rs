@@ -123,6 +123,52 @@ fn containment_is_by_component_not_by_string_prefix() {
 }
 
 #[test]
+fn a_request_cannot_walk_out_of_the_ceiling_with_dot_dot() {
+    // `/root/sub/../..` is lexically inside `/root` but resolves outside it.
+    // Checking the spelling and granting the resolution is the bug: the check
+    // must run on the path that will actually be granted.
+    let base = std::env::temp_dir().join(format!("agentos-grant-dotdot-{}", std::process::id()));
+    let root = base.join("outbox");
+    let outside = base.join("etc");
+    std::fs::create_dir_all(root.join("sub")).expect("root");
+    std::fs::create_dir_all(&outside).expect("outside");
+
+    let c = Ceiling {
+        write_roots: vec![root.clone()],
+        allowed_hosts: Vec::new(),
+        mail_outbox: None,
+    };
+
+    let escape = root.join("sub").join("..").join("..").join("etc");
+    let error = c
+        .narrow(&Grants {
+            write_roots: vec![escape.to_string_lossy().into_owned()],
+            ..Grants::default()
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, grants::GrantError::WriteRootOutside { .. }),
+        "`..` escaped the ceiling: got {error:?}"
+    );
+
+    // The mirror case: `..` that stays inside the root is not a traversal, so the
+    // fix must not reject every path containing `..`.
+    let inside = root.join("sub").join("..");
+    let granted = c
+        .narrow(&Grants {
+            write_roots: vec![inside.to_string_lossy().into_owned()],
+            ..Grants::default()
+        })
+        .expect("`..` that stays inside the root is not an escape");
+    assert_eq!(
+        granted.write.expect("granted").root(),
+        std::fs::canonicalize(&root).expect("canonical root")
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
 fn a_request_for_nothing_gets_no_capabilities() {
     let grants = ceiling().narrow(&Grants::default()).unwrap();
     assert!(grants.write.is_none());
