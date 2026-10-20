@@ -282,6 +282,128 @@ fn a_closed_socket_yields_an_error_rather_than_a_stale_descriptor() {
 }
 
 #[test]
+fn a_peer_that_closes_without_sending_is_eof_not_a_descriptor() {
+    // A clean EOF is not a zero-length control message. Before this was
+    // distinguished, the zeroed buffer could be read as fd 0.
+    let (host, worker) = socket_pair();
+    unsafe {
+        libc::close(host);
+    }
+
+    let err = recv_fd(worker).expect_err("EOF is not a descriptor");
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+
+    unsafe {
+        libc::close(worker);
+    }
+}
+
+/// Put two descriptors into one `SCM_RIGHTS` message.
+///
+/// `send_fd` deliberately carries one. This helper exists to send the message a
+/// malicious peer would send.
+fn send_two_descriptors(socket: RawFd, a: RawFd, b: RawFd) {
+    let byte = [1u8];
+    let mut iov = libc::iovec {
+        iov_base: byte.as_ptr() as *mut libc::c_void,
+        iov_len: 1,
+    };
+    let mut cmsg_buf = [0u8; 64];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = unsafe {
+        libc::CMSG_SPACE((2 * std::mem::size_of::<RawFd>()) as u32) as _
+    };
+
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        assert!(!cmsg.is_null());
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len =
+            libc::CMSG_LEN((2 * std::mem::size_of::<RawFd>()) as u32) as _;
+        let data = libc::CMSG_DATA(cmsg);
+        std::ptr::copy_nonoverlapping(
+            &a as *const RawFd as *const u8,
+            data,
+            std::mem::size_of::<RawFd>(),
+        );
+        std::ptr::copy_nonoverlapping(
+            &b as *const RawFd as *const u8,
+            data.add(std::mem::size_of::<RawFd>()),
+            std::mem::size_of::<RawFd>(),
+        );
+        let sent = libc::sendmsg(socket, &msg, 0);
+        assert_eq!(
+            sent,
+            1,
+            "sendmsg: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+/// How many descriptors in this process point at `path`.
+///
+/// Reading `/proc/self/fd` and resolving each link, rather than counting the
+/// directory, so unrelated descriptors opened by other tests do not make this
+/// flaky.
+fn open_descriptors_for(path: &std::path::Path) -> usize {
+    let target = std::fs::canonicalize(path).unwrap();
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| std::fs::read_link(e.path()).ok())
+        .filter(|p| std::fs::canonicalize(p).ok().as_deref() == Some(target.as_path()))
+        .count()
+}
+
+#[test]
+fn a_second_descriptor_in_the_same_message_is_closed_not_leaked() {
+    // The kernel installs every descriptor in an SCM_RIGHTS message before the
+    // receiver runs. Keeping only the first and returning would leave the second
+    // open in this process: a capability the receiver never asked for, held until
+    // the process exits.
+    let s = Scratch::new("two-descriptors");
+    let first = s.path("first.txt");
+    let second = s.path("second.txt");
+    std::fs::write(&first, b"first\n").unwrap();
+    std::fs::write(&second, b"second\n").unwrap();
+
+    let g1 = open_granted(&first, Expect::ReadOnlyFile, source()).unwrap();
+    let g2 = open_granted(&second, Expect::ReadOnlyFile, source()).unwrap();
+    assert_eq!(
+        open_descriptors_for(&second),
+        1,
+        "the grant should be the only descriptor for the second file"
+    );
+
+    let (host, worker) = socket_pair();
+    send_two_descriptors(host, g1.as_raw(), g2.as_raw());
+
+    let received = recv_fd(worker).unwrap();
+
+    assert_eq!(
+        open_descriptors_for(&second),
+        1,
+        "the surplus descriptor was leaked into the receiver"
+    );
+    assert_eq!(
+        open_descriptors_for(&first),
+        2,
+        "the returned descriptor should be the first in the message"
+    );
+
+    drop(received);
+    unsafe {
+        libc::close(host);
+        libc::close(worker);
+    }
+}
+
+#[test]
 fn opening_a_non_regular_file_as_a_file_is_refused() {
     // A fifo would open and then block or behave unexpectedly, which is not what
     // a file grant means.

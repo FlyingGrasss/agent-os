@@ -241,9 +241,19 @@ mod transfer {
 
     /// Receive a descriptor, and the single control byte that frames it.
     ///
-    /// The control message is checked rather than trusted: a caller must verify
-    /// `cmsg_type == SCM_RIGHTS`, because a socket peer that sent something else
-    /// would otherwise have the receiver read a garbage fd.
+    /// The control message is checked rather than trusted. Three things are
+    /// enforced here rather than left to the caller:
+    ///
+    /// * **The payload is long enough for the fd it claims to carry.** A short
+    ///   `cmsg_len` would otherwise make `CMSG_DATA` copy bytes past the payload;
+    ///   with a zeroed buffer that reads as fd `0`, i.e. this process's stdin.
+    /// * **Only one descriptor is kept.** The kernel installs *every* descriptor
+    ///   in an `SCM_RIGHTS` message the moment `recvmsg` returns, before this
+    ///   function can decide anything. A peer that sends two would otherwise have
+    ///   the second leak into the receiver: an open capability nobody agreed to
+    ///   hold, and a descriptor-exhaustion route.
+    /// * **`CLOEXEC` is set atomically** with `MSG_CMSG_CLOEXEC`, not by a
+    ///   post-hoc `fcntl` that another thread's `exec` could race.
     pub fn recv_fd(socket: RawFd) -> io::Result<OwnedFd> {
         let mut byte = [0u8; 1];
         let mut iov = libc::iovec {
@@ -258,9 +268,15 @@ mod transfer {
         msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
         msg.msg_controllen = cmsg_buf.len() as _;
 
-        let got = unsafe { libc::recvmsg(socket, &mut msg, 0) };
+        let got = unsafe { libc::recvmsg(socket, &mut msg, libc::MSG_CMSG_CLOEXEC) };
         if got < 0 {
             return Err(io::Error::last_os_error());
+        }
+        if got == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "peer closed without sending a descriptor",
+            ));
         }
         // `MSG_CTRUNC` means the control data did not fit, so the descriptor was
         // dropped and whatever is in the buffer is not a descriptor.
@@ -271,39 +287,65 @@ mod transfer {
             ));
         }
 
+        // Collect every descriptor before deciding anything: once we return an
+        // error those descriptors are still open, so the error paths below have to
+        // close them too. A message carrying anything other than one
+        // `SCM_RIGHTS` cmsg contributes nothing.
+        let mut received: Vec<RawFd> = Vec::new();
         unsafe {
-            let cmsg = libc::CMSG_FIRSTHDR(&msg);
-            if cmsg.is_null() || (*cmsg).cmsg_level != libc::SOL_SOCKET {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "no control header accompanied the descriptor",
-                ));
+            let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+            while !cmsg.is_null() {
+                if (*cmsg).cmsg_level == libc::SOL_SOCKET
+                    && (*cmsg).cmsg_type == libc::SCM_RIGHTS
+                {
+                    let header = libc::CMSG_LEN(0) as usize;
+                    let len = (*cmsg).cmsg_len as usize;
+                    if len >= header {
+                        let payload = len - header;
+                        let count = payload / std::mem::size_of::<RawFd>();
+                        let data = libc::CMSG_DATA(cmsg);
+                        for i in 0..count {
+                            let mut fd: RawFd = -1;
+                            std::ptr::copy_nonoverlapping(
+                                data.add(i * std::mem::size_of::<RawFd>()),
+                                &mut fd as *mut RawFd as *mut u8,
+                                std::mem::size_of::<RawFd>(),
+                            );
+                            received.push(fd);
+                        }
+                    }
+                }
+                cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
             }
-            if (*cmsg).cmsg_type != libc::SCM_RIGHTS {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "control message was not SCM_RIGHTS",
-                ));
-            }
-            let mut fd: RawFd = -1;
-            std::ptr::copy_nonoverlapping(
-                libc::CMSG_DATA(cmsg),
-                &mut fd as *mut RawFd as *mut u8,
-                std::mem::size_of::<RawFd>(),
-            );
-            if fd < 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "received an invalid descriptor",
-                ));
-            }
-            // `CLOEXEC` so a later `exec` does not silently inherit it.
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags >= 0 {
-                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-            }
-            Ok(OwnedFd::from_raw_fd(fd))
         }
+
+        let result = match received.split_first() {
+            Some((&first, _)) => {
+                if first < 0 {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "received an invalid descriptor",
+                    ))
+                } else {
+                    Ok(first)
+                }
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "no SCM_RIGHTS descriptor accompanied the message",
+            )),
+        };
+
+        // Close the surplus before returning, whether the first one was usable.
+        for &extra in received.iter().skip(1) {
+            if extra >= 0 {
+                unsafe {
+                    libc::close(extra);
+                }
+            }
+        }
+
+        result.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
     }
 }
 

@@ -1227,9 +1227,10 @@ mod imp {
         }
 
         // 2. Scrub, then verify. Both must precede confinement; see the module
-        //    docs for what stops working afterwards.
-        scrub_inherited_fds();
-        if leaked_fd_count() != 0 {
+        //    docs for what stops working afterwards. A failure to enumerate is a
+        //    failure to scrub: an unreadable `/proc/self/fd` must not be read as
+        //    "nothing was inherited".
+        if scrub_inherited_fds().is_err() || !matches!(leaked_fd_count(), Ok(0)) {
             refuse_and_die(b"FD_SCRUB_FAILED");
         }
 
@@ -1494,7 +1495,12 @@ mod imp {
 
     /// Close every inherited descriptor except the standard streams and the
     /// control socket.
-    fn scrub_inherited_fds() {
+    ///
+    /// A failure to enumerate is a failure to scrub, not a no-op: `close_range`
+    /// may be unavailable on an old kernel, and `/proc` may not be mounted in a
+    /// container. Returning `Ok` because nothing could be walked would leave the
+    /// worker holding the daemon's descriptors, which is exactly what I5 forbids.
+    fn scrub_inherited_fds() -> std::io::Result<()> {
         let first = CONTROL_FD + 1;
         // `close_range` is one syscall, resolves no paths, and cannot race
         // because the child is single-threaded. Tried first; its absence is not
@@ -1509,29 +1515,31 @@ mod imp {
             )
         };
         if rc == 0 {
-            return;
+            return Ok(());
         }
-        for_each_open_fd(|fd| {
+        for_each_open_fd(c"/proc/self/fd", |fd| {
             if fd >= first {
                 // SAFETY: `fd` came from the kernel's own enumeration of this
                 // process, so it is open here. Nothing in this closure opens a
                 // descriptor, so it cannot be closed twice.
                 unsafe { libc::close(fd) };
             }
-        });
+        })
     }
 
     /// How many descriptors are still open above the control socket.
     ///
-    /// Runs before Landlock, because it reads `/proc/self/fd`.
-    fn leaked_fd_count() -> i32 {
+    /// Runs before Landlock, because it reads `/proc/self/fd`. An `Err` means the
+    /// count is *unknown*, and the caller must treat that as a refusal rather than
+    /// as zero.
+    fn leaked_fd_count() -> std::io::Result<i32> {
         let mut leaked = 0;
-        for_each_open_fd(|fd| {
+        for_each_open_fd(c"/proc/self/fd", |fd| {
             if fd > CONTROL_FD {
                 leaked += 1;
             }
-        });
-        leaked
+        })?;
+        Ok(leaked)
     }
 
     /// `__NR_close_range`, or a value that always fails on architectures where
@@ -1550,27 +1558,31 @@ mod imp {
     /// Walk `/proc/self/fd` with raw syscalls and apply `f` to each descriptor.
     ///
     /// `opendir`/`readdir` are not used because they allocate, and this runs in a
-    /// process that just forked out of a possibly-multithreaded parent.
+    /// process that just forked out of a possibly multithreaded parent.
     /// `open`, `getdents64` and `close` over a stack buffer allocate nothing.
     ///
-    /// If the directory cannot be opened, nothing is passed to `f` and
-    /// [`leaked_fd_count`] stays at zero, which would read as "nothing leaked".
-    /// That is why [`scrub_inherited_fds`] treats a failed enumeration as a
-    /// refusal before reaching here.
-    fn for_each_open_fd(mut f: impl FnMut(libc::c_int)) {
+    /// Returns `Err` if the directory cannot be opened, if `getdents64` fails, or
+    /// if the buffer holds a malformed record. Callers must treat that as a
+    /// refusal: a partial walk cannot prove that nothing was inherited, and
+    /// saying "zero leaked" when the walk never ran is the fail-open this
+    /// function exists to prevent.
+    fn for_each_open_fd(
+        dir_path: &std::ffi::CStr,
+        mut f: impl FnMut(libc::c_int),
+    ) -> std::io::Result<()> {
         // SAFETY: opening a NUL-terminated literal with no other pointer
         // arguments.
         let dir = unsafe {
             libc::open(
-                c"/proc/self/fd".as_ptr(),
+                dir_path.as_ptr(),
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
         if dir < 0 {
-            return;
+            return Err(std::io::Error::last_os_error());
         }
         let mut buf = [0u8; 4096];
-        loop {
+        let walked = loop {
             // SAFETY: `buf` is 4096 writable bytes and `dir` is an open
             // directory descriptor this function owns.
             let n = unsafe {
@@ -1581,30 +1593,41 @@ mod imp {
                     buf.len(),
                 )
             };
-            if n <= 0 {
-                break;
+            if n == 0 {
+                break Ok(());
+            }
+            if n < 0 {
+                break Err(std::io::Error::last_os_error());
             }
             let n = n as usize;
             let mut off = 0usize;
+            let mut malformed = false;
             while off < n {
                 let base = unsafe { buf.as_ptr().add(off) };
                 // struct linux_dirent64 { u64 d_ino; s64 d_off; u16 d_reclen;
                 //                      u8 d_type; char d_name[]; }
                 let reclen =
                     unsafe { std::ptr::read_unaligned(base.add(16) as *const u16) } as usize;
-                if reclen == 0 {
-                    // Malformed record: stop rather than spin forever on a zero
-                    // length. The `break` is the whole fix; advancing `off` as
-                    // well would be dead, and a dead assignment here is how the
-                    // real version of this loop got quietly rewritten later.
+                if reclen == 0 || off + reclen > n {
+                    // A record that does not fit the buffer the kernel just
+                    // filled is corruption, not an end-of-buffer marker. Stop
+                    // with an error rather than silently accepting a partial
+                    // view of the fd table.
+                    malformed = true;
                     break;
                 }
                 let name = unsafe { base.add(19) };
+                let max_name = reclen.saturating_sub(19);
                 let mut value: libc::c_int = 0;
                 let mut i = 0usize;
                 loop {
-                    // SAFETY: bounded by the record's own NUL terminator, with a
-                    // hard cap as a second bound.
+                    if i >= max_name {
+                        // No NUL inside the record: refuse to read into the next
+                        // one looking for it.
+                        value = -1;
+                        break;
+                    }
+                    // SAFETY: bounded by the record's own length.
                     let c = unsafe { *name.add(i) };
                     if c == 0 {
                         break;
@@ -1619,10 +1642,6 @@ mod imp {
                         .saturating_mul(10)
                         .saturating_add((c - b'0') as i32);
                     i += 1;
-                    if i > 20 {
-                        value = -1;
-                        break;
-                    }
                 }
                 // `dir` is this function's own handle and is closed below.
                 if value > 0 && value != dir {
@@ -1630,9 +1649,16 @@ mod imp {
                 }
                 off += reclen;
             }
-        }
+            if malformed {
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed /proc/self/fd record",
+                ));
+            }
+        };
         // SAFETY: `dir` is owned by this function and closed exactly once.
         unsafe { libc::close(dir) };
+        walked
     }
 
     // -----------------------------------------------------------------------
@@ -1959,6 +1985,35 @@ fn reap_pid(pid: libc::pid_t) {
         let _ = write_all(CONTROL_FD, msg.as_bytes());
         // SAFETY: as above.
         unsafe { libc::_exit(EXIT_REFUSED) }
+    }
+
+    #[cfg(test)]
+    mod fd_table_tests {
+        use super::*;
+        use std::os::fd::AsRawFd;
+
+        #[test]
+        fn an_unreadable_fd_table_is_an_error_not_an_empty_one() {
+            // The caller must be able to tell "nothing was inherited" from "I
+            // could not look". Returning `Ok(())` with no calls is what would
+            // turn a container without `/proc` into a worker holding every one
+            // of the daemon's descriptors.
+            let err = for_each_open_fd(c"/proc/agentos-no-such-fd-table", |_| {})
+                .expect_err("an unreadable table must not read as empty");
+            assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        }
+
+        #[test]
+        fn the_walk_reports_a_descriptor_that_is_open() {
+            let file = std::fs::File::open("/proc/self/status").unwrap();
+            let wanted = file.as_raw_fd();
+            let mut seen = Vec::new();
+            for_each_open_fd(c"/proc/self/fd", |fd| seen.push(fd)).unwrap();
+            assert!(
+                seen.contains(&wanted),
+                "the walk missed an open descriptor ({wanted}): {seen:?}"
+            );
+        }
     }
 }
 

@@ -884,14 +884,33 @@ fn a_flood_is_deferred_rather_than_dropped() {
     // root -- which is the whole point of the directory: a root file is retried on
     // every poll, and a deferred one waits for a token. Deleting it would be an
     // attacker's win.
-    assert_eq!(scratch.entries_in("inbox/deferred"), vec!["payload-5.txt"]);
+    //
+    // Which of the six is deferred depends on directory iteration order, which is
+    // not defined and differs between filesystems (this test passed on one and
+    // failed on another by naming `payload-5.txt`). Assert the property that
+    // matters -- exactly one, under its own name, carrying its own bytes -- rather
+    // than the order the author's filesystem happened to return.
+    let deferred = scratch.entries_in("inbox/deferred");
+    assert_eq!(
+        deferred.len(),
+        1,
+        "the overflow must be deferred under its own name, got {deferred:?}"
+    );
+    let name = deferred[0].as_str();
     assert!(
-        !inbox_dir.join("payload-5.txt").exists(),
+        name.starts_with("payload-") && name.ends_with(".txt"),
+        "unexpected deferred name: {name}"
+    );
+    assert!(
+        !inbox_dir.join(name).exists(),
         "the deferred payload was never moved out of the root"
     );
+    let index = name
+        .trim_start_matches("payload-")
+        .trim_end_matches(".txt");
     assert_eq!(
-        std::fs::read_to_string(inbox_dir.join("deferred/payload-5.txt")).ok(),
-        Some("distinct payload 5".to_string()),
+        std::fs::read_to_string(inbox_dir.join("deferred").join(name)).ok(),
+        Some(format!("distinct payload {index}")),
         "the deferred payload's bytes did not survive the deferral"
     );
 }
