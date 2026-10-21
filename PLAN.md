@@ -4,8 +4,8 @@ Status against the original seven-phase roadmap. Checked boxes mean built **and*
 covered by a test that would fail if the property broke. Anything unchecked with
 a note means something was built but the phase's exit criterion is not met.
 
-Last updated to match commit `cccac20`, plus the strict-mode measurement and the
-cgroup/namespace confinement work in the working tree.
+Last updated to match commit `7a3d8f6`, which adds the strict-mode measurement
+and the cgroup/namespace confinement work.
 
 **Verification for this update:** the workspace test suite and clippy under
 `-D warnings` are clean on Linux (`x86_64-unknown-linux-gnu`) and on the Windows
