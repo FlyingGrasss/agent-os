@@ -293,6 +293,29 @@ fn run_child() {
             println!("{PROBE}\twrite\tDENIED errno={}", last_errno());
             return;
         }
+        // A one-millisecond sleep, through the syscall `std::thread::sleep`
+        // actually uses. `nanosleep` being on the list is not the same claim:
+        // std reaches for `clock_nanosleep`, and a profile that omits it makes
+        // every confined image that sleeps abort inside libstd.
+        let ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000,
+        };
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_clock_nanosleep,
+                libc::CLOCK_MONOTONIC,
+                0,
+                &ts as *const libc::timespec,
+                std::ptr::null_mut::<libc::timespec>(),
+            )
+        };
+        if rc == 0 {
+            println!("{PROBE}\tclock_nanosleep\tALLOWED");
+        } else {
+            println!("{PROBE}\tclock_nanosleep\tDENIED errno={}", last_errno());
+            return;
+        }
     } else {
         println!("{PROBE}\tfilter\tNONE");
     }
@@ -839,6 +862,18 @@ fn a_filesystem_profile_can_still_read_files() {
     let (report, _) = run_scenario(Scenario::Filesystem);
     report.allowed("open_dev_null");
     report.allowed("write");
+}
+
+#[test]
+fn a_confined_image_can_sleep_through_the_syscall_libstd_uses() {
+    // `nanosleep` and `clock_nanosleep` are different syscalls, and Rust's
+    // `std::thread::sleep` uses the latter. Missing it is not a security
+    // property, it is an image that panics on its first backoff. The probe
+    // calls exactly that syscall after the filter is installed.
+    let (report, _) = run_scenario(Scenario::Filesystem);
+    report.allowed("clock_nanosleep");
+    let (exec, _) = run_scenario(Scenario::Exec);
+    exec.allowed("clock_nanosleep");
 }
 
 #[test]

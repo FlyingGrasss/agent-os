@@ -86,11 +86,14 @@
 //!
 //! # What the pool does *not* do
 //!
-//! - **It is not a resource limiter.** No cgroup, so a runaway worker burns CPU
-//!   until the idle timeout or the request cap reaps it. On the target host
-//!   cgroup v2 is not delegable to an unprivileged uid.
-//! - **It is not a namespace.** The worker shares the host's uid, mount table
-//!   and network namespace. Landlock and seccomp are the whole story here.
+//! - **It does not limit resources unless asked.** cgroup v2 limits are
+//!   configured with [`PoolConfig::cgroup_limits`] and enforced by
+//!   [`crate::cgroup`]. Without them a runaway worker burns CPU until the idle
+//!   timeout or the request cap reaps it.
+//! - **It shares the host user and mount namespaces unless asked.** Namespace
+//!   isolation is configured with [`PoolConfig::namespaces`] and enforced by
+//!   [`crate::ns`]. Without it Landlock and seccomp are the whole story, and
+//!   the worker shares the host's `/tmp`.
 //! - **It does not vouch for the worker's output.** A reply's descriptors are
 //!   bounded by [`PoolConfig::max_returned_fds`] and unexpected ones are a
 //!   protocol error, but a caller that accepts a returned descriptor is
@@ -263,6 +266,15 @@ pub enum PoolError {
     /// A descriptor could not be transferred.
     #[error("descriptor transfer failed: {0}")]
     Transfer(#[source] std::io::Error),
+
+    /// cgroup v2 setup failed, so no worker was started under the requested
+    /// limits.
+    ///
+    /// Every cgroup failure is a refusal. The pool never falls back to spawning
+    /// without the limits that were asked for, because a worker that believes it
+    /// has a memory ceiling it does not have is worse than no worker.
+    #[error("refusing to spawn: {0}")]
+    Cgroup(#[from] crate::cgroup::CgroupError),
 }
 
 // ---------------------------------------------------------------------------
@@ -282,12 +294,32 @@ pub struct PoolConfig {
     max_reply_bytes: usize,
     max_returned_fds: usize,
     allow_threaded_fork: bool,
+    cgroup_limits: Option<crate::cgroup::CgroupLimits>,
+    cgroup_root: Option<std::path::PathBuf>,
+    namespaces: crate::ns::Namespaces,
 }
 
 impl Default for PoolConfig {
     /// Deliberately modest. Four workers is enough to stop one slow tool from
     /// serialising a session. These are not tuning recommendations and every one
     /// of them is overridable.
+    ///
+    /// Resource limits and namespaces are **off** by default, and that is a
+    /// decision rather than an omission:
+    ///
+    /// - a cgroup is a host interface that may not be delegated (no systemd,
+    ///   no cgroup v2, a container without controllers). Silently applying
+    ///   different limits from the ones a caller expected is not better than not
+    ///   applying any; asking for limits and not getting them is a typed error,
+    ///   so opting in is a single builder call and cannot be mistaken for
+    ///   success;
+    /// - a private `/tmp` invalidates every Landlock grant that points into the
+    ///   host `/tmp`, because the mount namespace runs before the ruleset is
+    ///   built. A pool whose grants live there must choose between the two, and
+    ///   a default that failed closed on every such caller would be a breaking
+    ///   change disguised as a safety improvement.
+    ///
+    /// Both are enforced, not advisory, once enabled.
     fn default() -> Self {
         PoolConfig {
             workers: 4,
@@ -305,6 +337,9 @@ impl Default for PoolConfig {
             max_reply_bytes: 8 * 1024 * 1024,
             max_returned_fds: 8,
             allow_threaded_fork: false,
+            cgroup_limits: None,
+            cgroup_root: None,
+            namespaces: crate::ns::Namespaces::None,
         }
     }
 }
@@ -370,6 +405,51 @@ impl PoolConfig {
         self
     }
 
+    /// Put every worker under these cgroup v2 limits.
+    ///
+    /// One cgroup is created per worker, before the fork, and the child is moved
+    /// into it after `fork(2)` and before `execveat(2)`. If any step fails the
+    /// pool does not spawn: see [`crate::cgroup`]. There is no partial
+    /// application and no fallback to an unlimited worker.
+    ///
+    /// The worker image sees the cgroup path in the `AGENTOS_SANDBOX_CGROUP`
+    /// environment variable. That is informational; the enforcement is the
+    /// kernel's, not the variable's.
+    pub fn cgroup_limits(mut self, limits: crate::cgroup::CgroupLimits) -> Self {
+        self.cgroup_limits = Some(limits);
+        self
+    }
+
+    /// Use this directory as the parent cgroup instead of discovering one.
+    ///
+    /// The directory must be a writable cgroup v2 directory whose
+    /// `cgroup.controllers` offers `cpu`, `memory` and `pids`. This exists so a
+    /// deployment can pin the root, and so the fail-closed path can be tested
+    /// against a directory that is deliberately unusable.
+    ///
+    /// Only meaningful together with [`PoolConfig::cgroup_limits`]; setting it
+    /// without limits is a configuration error rather than a silently ignored
+    /// option.
+    pub fn cgroup_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.cgroup_root = Some(root.into());
+        self
+    }
+
+    /// Place workers in private user and mount namespaces with a fresh `/tmp`.
+    ///
+    /// See [`crate::ns`]. Applied in the child before Landlock and seccomp. If
+    /// the namespaces cannot be created the worker refuses to start; nothing
+    /// falls back to a shared namespace.
+    ///
+    /// Note that the private `/tmp` replaces the host `/tmp` *before* Landlock
+    /// rules are built, so a [`crate::Confine`] grant that names a path under
+    /// `/tmp` must be changed to a path outside it (or the namespace policy
+    /// left at [`crate::ns::Namespaces::None`]).
+    pub fn namespaces(mut self, namespaces: crate::ns::Namespaces) -> Self {
+        self.namespaces = namespaces;
+        self
+    }
+
     fn validate(&self) -> Result<(), PoolError> {
         if self.workers == 0 {
             return Err(PoolError::BadConfig(
@@ -386,6 +466,13 @@ impl PoolConfig {
         if self.max_requests == 0 {
             return Err(PoolError::BadConfig(
                 "max_requests of zero would replace every worker after every request".into(),
+            ));
+        }
+        if self.cgroup_root.is_some() && self.cgroup_limits.is_none() {
+            return Err(PoolError::BadConfig(
+                "a cgroup root was configured without cgroup limits; a cgroup that enforces \
+                 nothing is not a confinement layer"
+                    .into(),
             ));
         }
         Ok(())
@@ -611,6 +698,9 @@ mod imp {
     use crate::fdpass::{recv_fd, send_fd, Granted};
     use crate::{Confine, SeccompProfile};
 
+    use crate::cgroup::Cgroup;
+    use crate::ns::{self, Namespaces};
+
     /// How far a descriptor-table walk will look.
     ///
     /// A process with a million-descriptor limit does not need a million
@@ -628,6 +718,10 @@ mod imp {
         sock: UnixStream,
         served: u32,
         idle_since: Instant,
+        /// The worker's cgroup, when limits were configured. Dropping it removes
+        /// the directory, which is what makes teardown race-safe: every path
+        /// that retires a worker also drops this.
+        cgroup: Option<Cgroup>,
     }
 
     impl Worker {
@@ -660,6 +754,10 @@ mod imp {
         confine: Confine,
         profile: SeccompProfile,
         config: PoolConfig,
+        /// The parent cgroup, resolved once at construction when limits are
+        /// configured. `None` means limits were not requested at all.
+        cgroup_root: Option<PathBuf>,
+        namespaces: Namespaces,
         inner: Mutex<Inner>,
         cond: Condvar,
     }
@@ -680,6 +778,17 @@ mod imp {
             config.validate()?;
             debug_assert_eq!(HELLO[7], PROTO_VERSION);
 
+            // Resolve the cgroup root before the first fork. If the host cannot
+            // provide a delegated cgroup, this is a construction error and no
+            // worker exists to be spawned without its limits.
+            let cgroup_root = match config.cgroup_limits {
+                Some(_) => Some(match &config.cgroup_root {
+                    Some(explicit) => crate::cgroup::validate_root(explicit)?,
+                    None => crate::cgroup::discover()?,
+                }),
+                None => None,
+            };
+
             let threads = thread_count().unwrap_or(0);
             if threads > 1 && !config.allow_threaded_fork {
                 return Err(PoolError::MultithreadedParent { threads });
@@ -688,12 +797,15 @@ mod imp {
             // PATH allocates, and there is no reason to do it in a forked child.
             let program = image.resolve()?;
 
+            let namespaces = config.namespaces;
             let pool = Pool {
                 image,
                 program,
                 confine,
                 profile,
                 config,
+                cgroup_root,
+                namespaces,
                 inner: Mutex::new(Inner {
                     free: Vec::new(),
                     live: 0,
@@ -905,7 +1017,23 @@ mod imp {
         /// The cold path. Everything expensive happens here, once per worker, and
         /// never on the request path.
         fn spawn_worker(&self) -> Result<Worker, PoolError> {
-            let (host, ctl) = socketpair().map_err(PoolError::Spawn)?;
+            // The cgroup is created *before* the fork so a setup failure is a
+            // construction error with no process to leak. The child is moved in
+            // after `fork` and before `exec`; see the barrier below.
+            let mut cgroup = match (&self.cgroup_root, self.config.cgroup_limits) {
+                (Some(root), Some(limits)) => {
+                    Some(Cgroup::create_in(root, &cgroup_name(), limits)?)
+                }
+                _ => None,
+            };
+
+            let (host, ctl) = match socketpair() {
+                Ok(pair) => pair,
+                Err(e) => {
+                    discard_cgroup(&mut cgroup);
+                    return Err(PoolError::Spawn(e));
+                }
+            };
 
             // A socketpair takes the two lowest free descriptors. If either
             // landed in 0..=2, the daemon was started with a closed standard
@@ -920,16 +1048,36 @@ mod imp {
                     libc::close(host);
                     libc::close(ctl);
                 }
+                discard_cgroup(&mut cgroup);
                 return Err(PoolError::Spawn(io::Error::other(
                     "standard descriptors 0, 1 or 2 are closed; refusing to spawn a \
                      worker that would inherit the control socket",
                 )));
             }
 
+            // The barrier that makes "moved into the cgroup before exec" true
+            // rather than likely. The child blocks on the read end before it
+            // does anything else; the parent writes one byte after it has moved
+            // the child, or after it has decided there is no cgroup to move it
+            // into.
+            let (sync_r, sync_w) = match sync_pipe() {
+                Ok(pair) => pair,
+                Err(e) => {
+                    // SAFETY: both descriptors are owned by this process.
+                    unsafe {
+                        libc::close(host);
+                        libc::close(ctl);
+                    }
+                    discard_cgroup(&mut cgroup);
+                    return Err(PoolError::Spawn(e));
+                }
+            };
+
             // argv and envp are materialised *before* the fork so the child needs
             // no allocation of its own beyond the confinement calls.
+            let cgroup_path = cgroup.as_ref().map(|c| c.path().to_path_buf());
             let argv = cstrings(&self.argv_items());
-            let envp = cstrings(&self.envp_items());
+            let envp = cstrings(&self.envp_items(cgroup_path.as_deref()));
 
             // SAFETY: `fork` duplicates the address space. Both branches below
             // are constrained to confine-then-exec work; see the module docs on
@@ -937,18 +1085,28 @@ mod imp {
             let pid = unsafe { libc::fork() };
             if pid < 0 {
                 let err = io::Error::last_os_error();
-                // SAFETY: both descriptors are owned by this process.
+                // SAFETY: all four descriptors are owned by this process.
                 unsafe {
                     libc::close(host);
                     libc::close(ctl);
+                    libc::close(sync_r);
+                    libc::close(sync_w);
                 }
+                discard_cgroup(&mut cgroup);
                 return Err(PoolError::Spawn(err));
             }
             if pid == 0 {
+                // SAFETY: the child does not own the write end, the parent's
+                // end of the socketpair, or `host`.
+                unsafe {
+                    libc::close(sync_w);
+                    libc::close(host);
+                }
                 child_main(
-                    ctl,
+                    ChildFds { sync: sync_r, ctl },
                     &self.program,
                     &self.confine,
+                    self.namespaces,
                     self.profile,
                     &argv,
                     &envp,
@@ -956,16 +1114,46 @@ mod imp {
             }
 
             // SAFETY: `ctl` was the child's end; the parent must not keep it.
-            unsafe { libc::close(ctl) };
+            // `sync_r` is the child's end of the barrier.
+            unsafe {
+                libc::close(ctl);
+                libc::close(sync_r);
+            }
+
+            // Move the child into its cgroup, then release the barrier. If the
+            // child died between fork and here, `attach` reports `ChildGone`:
+            // there is nothing left to confine, the handshake below will fail,
+            // and teardown removes the empty directory.
+            if let Some(cg) = &cgroup {
+                if let Err(e) = cg.attach(pid) {
+                    // SAFETY: `pid` is this process's child.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    reap_pid(pid);
+                    // SAFETY: the parent owns the write end.
+                    unsafe { libc::close(sync_w) };
+                    discard_cgroup(&mut cgroup);
+                    return Err(PoolError::Cgroup(e));
+                }
+            }
+            // A failed release means the child is already gone; the handshake
+            // will report a dead worker rather than a confinement success.
+            let _ = write_all(sync_w, &[1u8]);
+            // SAFETY: the parent owns the write end.
+            unsafe { libc::close(sync_w) };
+
             // SAFETY: `host` came from `socketpair` and is owned from here on.
             let sock = unsafe { UnixStream::from_raw_fd(host) };
 
             match self.await_handshake(sock, pid) {
-                Ok(w) => Ok(w),
+                Ok(mut w) => {
+                    w.cgroup = cgroup.take();
+                    Ok(w)
+                }
                 Err(e) => {
                     // SAFETY: `pid` is this process's child.
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                     reap_pid(pid);
+                    discard_cgroup(&mut cgroup);
                     Err(e)
                 }
             }
@@ -978,13 +1166,14 @@ mod imp {
             v
         }
 
-        fn envp_items(&self) -> Vec<std::ffi::OsString> {
-            let mut v: Vec<std::ffi::OsString> = Vec::with_capacity(32);
+        fn envp_items(&self, cgroup: Option<&Path>) -> Vec<std::ffi::OsString> {
+            let mut v: Vec<std::ffi::OsString> = Vec::with_capacity(34);
             for (k, val) in std::env::vars_os() {
-                // The pool owns this variable. A stale value inherited from the
-                // daemon's own environment would point the worker at a socket
-                // that is not its control channel.
-                if k == CONTROL_FD_ENV {
+                // The pool owns these variables. A stale value inherited from
+                // the daemon's own environment would point the worker at a
+                // socket that is not its control channel, or at a cgroup it is
+                // not in.
+                if k == CONTROL_FD_ENV || k == crate::cgroup::CGROUP_ENV {
                     continue;
                 }
                 let mut joined = k;
@@ -993,12 +1182,22 @@ mod imp {
                 v.push(joined);
             }
             v.push(format!("{CONTROL_FD_ENV}={CONTROL_FD}").into());
+            if let Some(path) = cgroup {
+                let mut joined = std::ffi::OsString::from(crate::cgroup::CGROUP_ENV);
+                joined.push("=");
+                joined.push(path.as_os_str());
+                v.push(joined);
+            }
             v
         }
 
         /// Read the worker's handshake, then check the kernel agrees it is
         /// confined.
-        fn await_handshake(&self, sock: UnixStream, pid: libc::pid_t) -> Result<Worker, PoolError> {
+        fn await_handshake(
+            &self,
+            sock: UnixStream,
+            pid: libc::pid_t,
+        ) -> Result<Worker, PoolError> {
             sock.set_read_timeout(Some(self.config.handshake_timeout))
                 .map_err(PoolError::Spawn)?;
             let fd = sock.as_raw_fd();
@@ -1042,6 +1241,12 @@ mod imp {
                 sock,
                 served: 0,
                 idle_since: Instant::now(),
+                // Filled in by `spawn_worker` once the worker is known to have
+                // reached its handshake. Putting it here this early would mean
+                // an ownership hand-off on the failure path, where the cgroup
+                // must outlive the check so it can be removed after the child is
+                // reaped.
+                cgroup: None,
             })
         }
     }
@@ -1086,6 +1291,21 @@ mod imp {
         /// This worker's pid.
         pub fn pid(&self) -> i32 {
             self.worker.as_ref().map(Worker::pid).unwrap_or(-1)
+        }
+
+        /// The cgroup the worker is in, when limits were configured.
+        ///
+        /// This is the path the pool created and moved the worker into, not a
+        /// kernel claim read back from `/proc`. A caller can read
+        /// `memory.max`, `pids.max`, `cpu.max` or `cgroup.procs` from it to see
+        /// what the worker is actually subject to. `None` means the pool was
+        /// built without [`PoolConfig::cgroup_limits`], so there is no cgroup
+        /// to describe.
+        pub fn cgroup_path(&self) -> Option<&std::path::Path> {
+            self.worker
+                .as_ref()
+                .and_then(|w| w.cgroup.as_ref())
+                .map(Cgroup::path)
         }
 
         /// Ask the worker to exit, and wait for it.
@@ -1228,14 +1448,51 @@ mod imp {
     /// Everything the forked child does, in the only order that is safe.
     ///
     /// Never returns.
-    fn child_main(
+    /// The two descriptors a freshly forked child inherits: the read end of the
+    /// cgroup barrier and the control socket. Bundled so the child entry point
+    /// keeps a readable argument list.
+    struct ChildFds {
+        sync: libc::c_int,
         ctl: libc::c_int,
+    }
+
+    fn child_main(
+        fds: ChildFds,
         program: &Path,
         confine: &Confine,
+        namespaces: Namespaces,
         profile: SeccompProfile,
         argv: &[CString],
         envp: &[CString],
     ) -> ! {
+        let ChildFds { sync: sync_fd, ctl } = fds;
+        // 0. Wait until the parent has moved this process into its cgroup (or
+        //    has decided there is none). This is the barrier that makes "the
+        //    worker is limited before it execs" a fact rather than a race: the
+        //    parent writes the child's pid to `cgroup.procs` and only then
+        //    writes the one byte this read is waiting for. A parent that dies
+        //    first closes the pipe, the read returns zero, and there is nothing
+        //    to run that would be confined.
+        let mut go = [0u8; 1];
+        let got = loop {
+            // SAFETY: reading one byte into a live local.
+            let n = unsafe {
+                libc::read(sync_fd, go.as_mut_ptr() as *mut libc::c_void, 1)
+            };
+            if n < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break n;
+        };
+        // SAFETY: `sync_fd` came from the pipe this process owns.
+        unsafe { libc::close(sync_fd) };
+        if got != 1 {
+            // No control socket to report on yet; nothing has been confined and
+            // nothing should run.
+            // SAFETY: `_exit` takes no locks and runs no atexit handlers.
+            unsafe { libc::_exit(EXIT_REFUSED) }
+        }
+
         // 1. Pin the control socket to a known descriptor number and clear
         //    CLOEXEC, or the exec would drop it and the handshake would never
         //    arrive. `dup3` clears FD_CLOEXEC on the new descriptor, but the
@@ -1277,12 +1534,29 @@ mod imp {
             refuse_and_die_msg(format!("OPEN_EXE errno={}", std::io::Error::last_os_error()));
         };
 
-        // 3. Confine. Both calls refuse rather than degrade, and each writes a
+        // 3. Namespaces, before Landlock and before seccomp, in that order.
+        //
+        //    Landlock rules are built from paths, and a mount namespace changes
+        //    what a path means. Applying Landlock first would pin rules to the
+        //    host's `/tmp` inode and then mount a different filesystem over it,
+        //    so the ruleset would describe a tree the worker cannot see and
+        //    would deny the tmpfs it is supposed to use. seccomp comes after
+        //    both because it is what makes the namespace state durable: neither
+        //    `mount(2)` nor `unshare(2)` is in any allowlist this crate installs.
+        //
+        //    A failure here is a refusal, not a fallback to a shared namespace.
+        if let Err(e) = ns::apply(namespaces) {
+            refuse_and_die_msg(format!("NAMESPACES: {e}"));
+        }
+
+        // 4. Confine. Both calls refuse rather than degrade, and each writes a
         //    refusal to the control socket first so the parent can say why
         //    instead of reporting an unexplained dead child.
         if let Err(e) = confine.clone().apply() {
             refuse_and_die_msg(e.to_string());
         }
+        // 5. seccomp last: everything below this line is unreachable for a
+        //    worker that wants to undo the two layers above.
         if let Err(e) = crate::apply_seccomp(profile) {
             refuse_and_die_msg(e.to_string());
         }
@@ -1791,6 +2065,43 @@ mod imp {
         Ok((fds[0], fds[1]))
     }
 
+    /// A one-byte pipe used as the cgroup-attachment barrier.
+    ///
+    /// `O_CLOEXEC` because the write end must never survive into the worker: if
+    /// it did, a worker that kept it open would hold the parent's end of a pipe
+    /// nobody is reading, and the descriptor-table scrub would have to account
+    /// for it. It is closed explicitly on both sides before exec regardless.
+    fn sync_pipe() -> io::Result<(libc::c_int, libc::c_int)> {
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` is a two-element array and the flags are valid.
+        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((fds[0], fds[1]))
+    }
+
+    /// A cgroup name unique across this process's workers.
+    fn cgroup_name() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "agentos-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    /// Remove a cgroup whose worker never made it into the pool, reporting a
+    /// removal failure rather than swallowing it.
+    fn discard_cgroup(cgroup: &mut Option<Cgroup>) {
+        if let Some(cg) = cgroup.take() {
+            if let Err(e) = cg.remove() {
+                eprintln!("agentos-sandbox: cgroup cleanup failed: {e}");
+            }
+        }
+    }
+
     /// Whether the socketpair landed on a standard stream.
     ///
     /// That can only happen when the daemon was started with fd 0, 1 or 2
@@ -2040,6 +2351,14 @@ fn reap_pid(pid: libc::pid_t) {
             let _ = worker.sock.shutdown(std::net::Shutdown::Both);
         }
         worker.pid = -1;
+        // The cgroup can only be removed once the task is gone, which is why
+        // this comes after the reap. A failure is reported because an empty
+        // cgroup left behind is an operator-visible leak, not a silent cost.
+        if let Some(cg) = worker.cgroup.take() {
+            if let Err(e) = cg.remove() {
+                eprintln!("agentos-sandbox: cgroup cleanup failed: {e}");
+            }
+        }
     }
 
     /// Tell the parent why the child is refusing, then die.

@@ -145,6 +145,12 @@ mod imp {
         ClockGettime,
         ClockGetres,
         Nanosleep,
+        /// `clock_nanosleep(2)`. The C library's `nanosleep` is a different
+        /// syscall, and Rust's `std::thread::sleep` reaches for this one. A
+        /// profile that grants only `nanosleep` looks complete and makes every
+        /// confined image that sleeps abort inside libstd with `ENOSYS`.
+        /// Sleeping confers no authority, so it belongs in the baseline.
+        ClockNanosleep,
         Exit,
         ExitGroup,
         Getpid,
@@ -283,6 +289,7 @@ mod imp {
                 Allowed::ClockGettime,
                 Allowed::ClockGetres,
                 Allowed::Nanosleep,
+                Allowed::ClockNanosleep,
                 Allowed::Exit,
                 Allowed::ExitGroup,
                 Allowed::Getpid,
@@ -455,6 +462,7 @@ mod imp {
                     Allowed::ClockGettime => libc::SYS_clock_gettime,
                     Allowed::ClockGetres => libc::SYS_clock_getres,
                     Allowed::Nanosleep => libc::SYS_nanosleep,
+                    Allowed::ClockNanosleep => libc::SYS_clock_nanosleep,
                     Allowed::Exit => libc::SYS_exit,
                     Allowed::ExitGroup => libc::SYS_exit_group,
                     Allowed::Getpid => libc::SYS_getpid,

@@ -68,8 +68,8 @@
 //! | Connect to a peer via inherited UNIX socket | `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` | V9 | 7.1 | **Refuse** | Not implemented; on a V9 kernel a peer holding a connected socket could reach into the child |
 //! | Kernel ABI newer than V7 | - | - | - | **Accept**, clamped to V7 | The kernel may know rights this crate does not model; those are unhandled, not disabled. `RESOLVE_UNIX` is covered in practice because `connect(2)` is refused, and any future right needs a row here before the profile can claim it |
 //! | `PR_SET_NO_NEW_PRIVS` | `prctl(2)` | always | - | **Refuse** | `landlock_restrict_self` returns `EPERM` without it; with `CAP_SYS_ADMIN` instead, a setuid exec could shed the ruleset |
-//! | cgroup v2 limits | - | - | - | **Not used** | Not delegable to an unprivileged uid on the target host |
-//! | user / mount namespaces | - | - | - | **Not used** | `unshare(CLONE_NEWUSER)` is denied for uid 1000 on the target host |
+//! | cgroup v2 limits | - | cgroup v2 | 4.5 | **Refuse** if requested | [`cgroup`] returns a typed error naming the paths it tried; the pool does not spawn. It is opt-in per pool, not a default |
+//! | user / mount namespaces | `unshare(CLONE_NEWUSER)` / `CLONE_NEWNS` | - | 3.8 / 2.4.19 | **Refuse** if requested | [`ns`] fails closed. Opt-in per pool because the private tmpfs replaces `/tmp`, which invalidates grants that point into it |
 //!
 //! The practical consequence: **AgentOS requires Landlock ABI V6 (Linux 6.12) or
 //! newer to confine any tool at all.** The filesystem half alone would only need
@@ -144,6 +144,20 @@ pub use abi::{detect as detect_kernel_support, Abi, Feature, KernelSupport, TARG
 pub use confine::{Confine, Enforced};
 pub use error::{ConfineError, SeccompError};
 pub use grants::{FsGrant, NetGrant, ReadOnly, ReadOnlyExec, ReadWrite};
+
+/// cgroup v2 resource limits for worker processes.
+///
+/// Linux-only in effect: off Linux every constructor returns
+/// [`cgroup::CgroupError::UnsupportedPlatform`]. The types compile everywhere so
+/// [`pool::PoolConfig`] can name them without a `cfg` at every call site.
+pub mod cgroup;
+
+/// User and mount namespace isolation for worker processes.
+///
+/// Linux-only in effect: off Linux [`ns::apply`] returns
+/// [`ns::NamespaceError::UnsupportedPlatform`]. The types compile everywhere so
+/// [`pool::PoolConfig`] can name them without a `cfg` at every call site.
+pub mod ns;
 
 /// Passing capabilities to a worker as real descriptors.
 #[cfg(unix)]

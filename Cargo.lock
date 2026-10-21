@@ -133,6 +133,7 @@ dependencies = [
  "agentos-types",
  "landlock",
  "libc",
+ "rustix",
  "serde",
  "thiserror 2.0.21",
 ]
