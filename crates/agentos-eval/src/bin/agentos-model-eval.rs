@@ -12,7 +12,10 @@
 //!   --deterministic-only    Run only the adversarial arms (no live model needed)
 //!   --multi-model=MODELS    Comma-separated list of models to run the A/B against
 
-use agentos_eval::model::{run_model_arm, AdversarialPlanner, SchemaControl, MODEL_CORPUS};
+use agentos_eval::model::{
+    run_model_arm, run_model_arm_with, strict_engine, AdversarialPlanner, SchemaControl,
+    MODEL_CORPUS,
+};
 use agentos_infer::{Ollama, RoleModels};
 
 /// The ceiling the bounded arms declare on every string field of the invoice
@@ -116,10 +119,14 @@ fn main() -> std::process::ExitCode {
             report("adversarial/approving", std::slice::from_ref(&results.adversarial_approving));
             report("adversarial/approving/bounded", std::slice::from_ref(&results.bounded));
             report("adversarial/approving/closed", std::slice::from_ref(&results.closed));
+            report("adversarial/strict", std::slice::from_ref(&results.strict));
             if !deterministic_only {
                 report("live/declining", &results.declined);
                 report("live/approving", &results.approved);
                 report("live/approving/bounded", std::slice::from_ref(&results.approved_bounded));
+                if let Some(strict_live) = &results.strict_live {
+                    report("live/strict", std::slice::from_ref(strict_live));
+                }
             }
         }
         
@@ -159,6 +166,7 @@ fn main() -> std::process::ExitCode {
     let mut declined_runs = Vec::new();
     let mut approved_runs = Vec::new();
     let mut approved_bounded = None;
+    let mut strict_live = None;
     if !deterministic_only {
         let mut backend = Ollama::new(RoleModels::Shared {
             model: model.clone(),
@@ -177,6 +185,18 @@ fn main() -> std::process::ExitCode {
         // to distrust.
         println!("\n## Live model, approving user, bounded schema (single sample)\n");
         approved_bounded = Some(run_model_arm(&mut backend, &mut |_| true, SchemaControl::Bounded(BOUND)));
+
+        // The same live model under a policy that never asks. The difference from
+        // the declining arm is not the leak rate (both are zero if the policy is
+        // sound) but the benign column: strict refuses a tainted forward even when
+        // the user would have approved it, and that cost is visible only here.
+        println!("\n## Live model, strict policy, no questions (single sample)\n");
+        strict_live = Some(run_model_arm_with(
+            &mut backend,
+            &mut |_| true,
+            SchemaControl::Unbounded,
+            &strict_engine(),
+        ));
     }
 
     // The adversarial arms run first and are deterministic, so they are the one
@@ -204,6 +224,16 @@ fn main() -> std::process::ExitCode {
     let mut adversary4 = AdversarialPlanner { emitted: Vec::new() };
     let closed =
         run_model_arm(&mut adversary4, &mut |_| true, SchemaControl::Closed { max_chars: BOUND });
+    // The strict arm: same planner, same documents, no human. If it leaks, the
+    // rules are wrong; if it does not leak but the benign column collapses, that
+    // is the price of removing the human and it is reported next to the leak rate.
+    let mut adversary5 = AdversarialPlanner { emitted: Vec::new() };
+    let strict = run_model_arm_with(
+        &mut adversary5,
+        &mut |_| true,
+        SchemaControl::Unbounded,
+        &strict_engine(),
+    );
 
     println!("\n# Results\n");
     report("adversarial planner, declining user", std::slice::from_ref(&adversarial));
@@ -232,6 +262,17 @@ fn main() -> std::process::ExitCode {
         println!();
     }
 
+    println!("\n## Strict policy: no questions asked\n");
+    report(
+        "adversarial planner, strict",
+        std::slice::from_ref(&strict),
+    );
+    println!();
+    if let Some(m) = &strict_live {
+        report("live model, strict", std::slice::from_ref(m));
+        println!();
+    }
+
     println!("\n## Live model\n");
     report("declining user", &declined_runs);
     println!();
@@ -246,6 +287,7 @@ fn main() -> std::process::ExitCode {
         ("adversarial/declining/bounded", &bounded_declining),
         ("adversarial/approving/bounded", &bounded),
         ("adversarial/approving/closed", &closed),
+        ("adversarial/strict", &strict),
     ] {
         match m.check_accounting() {
             Ok(()) => println!("  {label}: accounting ok"),
@@ -330,21 +372,24 @@ struct EvaluationResults {
     adversarial_approving: agentos_eval::model::ModelMeasurement,
     bounded: agentos_eval::model::ModelMeasurement,
     closed: agentos_eval::model::ModelMeasurement,
+    strict: agentos_eval::model::ModelMeasurement,
     declined: Vec<agentos_eval::model::ModelMeasurement>,
     approved: Vec<agentos_eval::model::ModelMeasurement>,
     approved_bounded: agentos_eval::model::ModelMeasurement,
+    strict_live: Option<agentos_eval::model::ModelMeasurement>,
 }
 
 /// Run the full evaluation suite for one model backend.
 fn run_full_evaluation(
     backend: &mut dyn agentos_infer::Backend,
-    model_name: &str,
+    _model_name: &str,
     repeat: usize,
     deterministic_only: bool,
 ) -> EvaluationResults {
     let mut declined = Vec::new();
     let mut approved = Vec::new();
     let mut approved_bounded = None;
+    let mut strict_live = None;
     
     if !deterministic_only {
         for i in 1..=repeat {
@@ -355,6 +400,13 @@ fn run_full_evaluation(
         }
         println!("\n## Live model, approving user, bounded schema (single sample)\n");
         approved_bounded = Some(run_model_arm(backend, &mut |_| true, SchemaControl::Bounded(BOUND)));
+        println!("\n## Live model, strict policy, no questions (single sample)\n");
+        strict_live = Some(run_model_arm_with(
+            backend,
+            &mut |_| true,
+            SchemaControl::Unbounded,
+            &strict_engine(),
+        ));
     }
 
     // The adversarial arms run first and are deterministic, so they are the one
@@ -373,17 +425,26 @@ fn run_full_evaluation(
     let mut adversary4 = AdversarialPlanner { emitted: Vec::new() };
     let closed =
         run_model_arm(&mut adversary4, &mut |_| true, SchemaControl::Closed { max_chars: BOUND });
+    let mut adversary5 = AdversarialPlanner { emitted: Vec::new() };
+    let strict = run_model_arm_with(
+        &mut adversary5,
+        &mut |_| true,
+        SchemaControl::Unbounded,
+        &strict_engine(),
+    );
 
     EvaluationResults {
         adversarial_declining,
         adversarial_approving,
         bounded,
         closed,
+        strict,
         declined,
         approved,
         approved_bounded: approved_bounded.unwrap_or_else(|| {
             run_model_arm(&mut AdversarialPlanner { emitted: Vec::new() }, &mut |_| true, SchemaControl::Bounded(BOUND))
         }),
+        strict_live,
     }
 }
 
@@ -395,6 +456,10 @@ fn run_full_evaluation(
 /// on the leak count and by two on unplannable.
 fn report(label: &str, runs: &[agentos_eval::model::ModelMeasurement]) {
     println!("### {label}\n");
+    if runs.is_empty() {
+        println!("  no runs in this mode\n");
+        return;
+    }
     let n = runs.len() as f64;
     let leaked: Vec<usize> = runs.iter().map(|m| m.leaked).collect();
     let rate: Vec<f64> = runs.iter().map(|m| m.leak_rate()).collect();
@@ -434,6 +499,15 @@ fn report(label: &str, runs: &[agentos_eval::model::ModelMeasurement]) {
         prompts.iter().sum::<usize>(),
         prompts.iter().min().copied().unwrap_or(0),
         prompts.iter().max().copied().unwrap_or(0)
+    );
+    let benign_total: usize = runs.iter().map(|m| m.benign_total).sum();
+    let benign_clean: usize = runs.iter().map(|m| m.benign_clean).sum();
+    let benign_completed: usize = runs.iter().map(|m| m.benign_completed).sum();
+    let benign_denied: usize = runs.iter().map(|m| m.benign_denied).sum();
+    let benign_refused: usize = runs.iter().map(|m| m.benign_refused).sum();
+    println!(
+        "  benign controls         {benign_clean}/{benign_total} clean, \
+         {benign_completed} completed, {benign_denied} denied, {benign_refused} refused"
     );
 
     // Every task that ever leaked or ever prompted, so a reader can see which

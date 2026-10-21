@@ -15,8 +15,8 @@
 //! built to make impossible.
 
 use agentos_eval::model::{
-    run_model_arm, AdversarialPlanner, ModelControlFailure, ModelMeasurement, ModelTask,
-    SchemaControl, MODEL_CORPUS,
+    run_model_arm, run_model_arm_with, strict_engine, AdversarialPlanner, ModelControlFailure,
+    ModelMeasurement, ModelTask, SchemaControl, MODEL_CORPUS,
 };
 use agentos_infer::{Backend, Completion, Conversation, InferError, Output, Role, Usage};
 use agentos_types::Trusted;
@@ -150,6 +150,7 @@ fn folding_unplannable_into_blocked_is_detected() {
         pin_denied_ids: vec![],
         schema_invented: 0,
         schema_invented_ids: vec![],
+        ..Default::default()
     };
     assert_eq!(
         broken.check_accounting(),
@@ -179,6 +180,7 @@ fn a_lost_bucket_is_detected() {
         pin_denied_ids: vec![],
         schema_invented: 0,
         schema_invented_ids: vec![],
+        ..Default::default()
     };
     assert_eq!(
         broken.check_accounting(),
@@ -215,6 +217,7 @@ fn an_unresolved_task_is_detected() {
         pin_denied_ids: vec![],
         schema_invented: 0,
         schema_invented_ids: vec![],
+        ..Default::default()
     };
     assert_eq!(
         broken.check_accounting(),
@@ -254,6 +257,7 @@ fn leaking_and_being_denied_can_co_occur() {
         pin_denied_ids: vec![],
         schema_invented: 0,
         schema_invented_ids: vec![],
+        ..Default::default()
     };
     assert_eq!(m.check_accounting(), Ok(()), "this must be legal");
 }
@@ -280,6 +284,7 @@ fn clean_cannot_exceed_completed() {
         pin_denied_ids: vec![],
         schema_invented: 0,
         schema_invented_ids: vec![],
+        ..Default::default()
     };
     assert_eq!(
         broken.check_accounting(),
@@ -432,6 +437,49 @@ fn the_adversarial_planner_is_deterministic() {
     let mut b = AdversarialPlanner { emitted: Vec::new() };
     let second = run_model_arm(&mut b, &mut |_| true, SchemaControl::Unbounded);
     assert_eq!(first, second, "the same corpus must produce the same result");
+}
+
+/// The fixture's plans must be able to finish when policy allows them.
+///
+/// This is the control for the benign column. Before it, the adversarial plan
+/// ended in `report(len(doc))`, which is a `BadField` on a record, so *every*
+/// plan halted after its sensitive call. Leaks were still counted, but benign
+/// completion was zero in every arm, and a utility cost cannot be measured
+/// against a baseline that never completes anything.
+#[test]
+fn an_approving_user_can_complete_a_benign_twin() {
+    let mut adversary = AdversarialPlanner { emitted: Vec::new() };
+    let m = run_model_arm(&mut adversary, &mut |_| true, SchemaControl::Unbounded);
+    assert!(
+        m.benign_completed > 0,
+        "an approving user must complete some benign twin, or the utility \
+         baseline is broken: {m:?}"
+    );
+}
+
+/// Strict mode reaches zero leaks without a human, and the benign column is
+/// the price.
+///
+/// Both facts belong in one test. Asserting only `leaked == 0` would let a
+/// configuration that refuses everything look like a perfect defence; asserting
+/// only the benign drop would miss the reason it exists.
+#[test]
+fn strict_trades_benign_forwarding_for_zero_leaks() {
+    let mut adversary = AdversarialPlanner { emitted: Vec::new() };
+    let m = run_model_arm_with(
+        &mut adversary,
+        &mut |_| true,
+        SchemaControl::Unbounded,
+        &strict_engine(),
+    );
+    assert_eq!(m.leaked, 0, "strict must not leak: {m:?}");
+    assert_eq!(m.prompts, 0, "strict must not ask a human: {m:?}");
+    assert!(
+        m.benign_completed < m.benign_total,
+        "the adversarial planner's benign twins forward document fields, so a \
+         no-forwarding policy must refuse some of them; otherwise the cost is \
+         not being measured: {m:?}"
+    );
 }
 
 /// Task ids are unique, so a report cannot silently merge two tasks.

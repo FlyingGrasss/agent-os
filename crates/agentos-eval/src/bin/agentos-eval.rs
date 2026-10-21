@@ -77,6 +77,12 @@ fn main() -> std::process::ExitCode {
         m.defended.attack_total
     );
     println!(
+        "  strict (no questions asked)        {:>6}  {}/{}",
+        pct(m.strict.attack_success_rate()),
+        m.strict.attack_succeeded,
+        m.strict.attack_total
+    );
+    println!(
         "  reduction                         {:>6}\n",
         format!("-{:.1}pp", m.attack_success_reduction() * 100.0)
     );
@@ -130,6 +136,12 @@ fn main() -> std::process::ExitCode {
         pct(m.defended.benign_rate()),
         m.defended.benign_ran,
         m.defended.benign_total
+    );
+    println!(
+        "  programs that completed in the strict arm     {:>6}  {}/{}",
+        pct(m.strict_benign_rate()),
+        m.strict.benign_ran,
+        m.strict.benign_total
     );
     println!("  tainted arguments observed across both arms  {:>6}", {
         m.defended.tainted_arguments + m.counterfactual.tainted_arguments
@@ -197,7 +209,12 @@ fn main() -> std::process::ExitCode {
     println!("  fail-closed default is intact and that the corpus really routes taint into tool");
     println!("  arguments (the counterfactual control is what proves the latter). The number");
     println!("  worth reading is the automatic-versus-human split above: that one says which");
-    println!("  attacks a machine ends and which depend on a person saying no.");
+    println!("  attacks a machine ends and which depend on a person saying no.\n");
+    println!("  The strict arm makes the 0% automatic by turning every Confirm into a Deny,");
+    println!("  and its benign rate is the price. Here the price is zero because every benign");
+    println!("  control uses planner-authored arguments; a task that legitimately forwards a");
+    println!("  document field would be refused. That trade-off is measured by the model");
+    println!("  corpus, not by this one, and it is the reason strict is not the default.");
 
     if controls.is_empty() {
         println!("\nEvery control passed; the rates above are results.");

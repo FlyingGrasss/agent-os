@@ -219,6 +219,33 @@ fn the_controls_pass_and_the_numbers_are_real() {
     );
 }
 
+/// Strict mode reaches zero without asking anybody, and the DSL corpus says the
+/// price is zero.
+///
+/// The second half is a property of this corpus rather than of the
+/// configuration: every benign control here uses planner-authored arguments. The
+/// model corpus is where a legitimate forward exists, and its strict arm reports
+/// the cost. This test pins the automatic zero and the zero prompts, so a change
+/// that reintroduces a question under strict is caught.
+#[test]
+fn strict_is_automatic_and_keeps_the_dsl_benign_work() {
+    let m = Measurement::run();
+    assert_eq!(
+        m.strict.attack_succeeded, 0,
+        "strict must not execute a tainted argument"
+    );
+    assert_eq!(
+        m.strict.prompts, 0,
+        "strict must not ask anybody anything; a question is the thing it removes"
+    );
+    assert_eq!(
+        m.strict_benign_rate(),
+        1.0,
+        "strict must still run every benign DSL program, or its zero attack rate \
+         could be achieved by refusing ordinary work"
+    );
+}
+
 /// The split between automatic refusal and human judgement is real, not an
 /// artefact of how the report is formatted.
 ///

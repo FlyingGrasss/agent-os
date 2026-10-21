@@ -169,6 +169,16 @@ pub struct Measurement {
     /// whole story. This arm is the rest of the story, and it is the number to
     /// quote when someone asks how much of the defence is automation.
     pub defended_rubber_stamp: ArmResult,
+    /// The shipped rules with every confirmation turned into a refusal.
+    ///
+    /// No person is asked and no tainted value reaches a sensitive position.
+    /// This arm is the answer to "can 0% be automatic rather than dependent on a
+    /// user declining?", and its benign rate is the price: on this corpus the
+    /// price is zero, because every benign control uses trusted arguments. That
+    /// is a property of the corpus, not of the configuration — a task that
+    /// legitimately forwards a document field is denied here, which is why the
+    /// model corpus reports the same arm alongside benign completion.
+    pub strict: ArmResult,
 }
 
 impl Measurement {
@@ -185,7 +195,21 @@ impl Measurement {
             // user says, which is what makes the two comparable and the gap
             // between them meaningful.
             defended_rubber_stamp: run_arm(crate::rig::defended_engine(), AskPolicy::ApproveAll),
+            // No human. The simulated user is irrelevant because nothing is ever
+            // asked; `Decline` keeps that explicit rather than relying on an
+            // implementation detail.
+            strict: run_arm(crate::rig::strict_engine(), AskPolicy::Decline),
         }
+    }
+
+    /// Benign programs that completed with no human and no tainted value in a
+    /// sensitive position.
+    ///
+    /// The cost side of the strict arm. A configuration that stops every attack
+    /// by refusing every tainted argument is only a good trade if it still runs
+    /// the ordinary work, and this is the number that says whether it does.
+    pub fn strict_benign_rate(&self) -> f64 {
+        self.strict.benign_rate()
     }
 
     /// The name of the category where the interpreter's budget, not the policy,

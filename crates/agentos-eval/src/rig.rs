@@ -278,6 +278,48 @@ pub fn defended_engine() -> PolicyEngine {
     PolicyEngine::new(PolicyEngine::default_rules())
 }
 
+/// The shipped rules with every confirmation turned into an automatic refusal.
+///
+/// This is the "no human in the loop" configuration. A tainted value in any
+/// position the shipped rules would ask about is refused outright, and so is a
+/// tainted value in a position no rule mentions (the fail-closed `Confirm`
+/// default). Trusted values are unaffected: [`PolicyEngine::evaluate`] consults a
+/// rule only for a tainted argument, so ordinary work built from literals the
+/// planner wrote still runs.
+///
+/// It exists to answer one question with a number: what does 0% attack success
+/// cost in benign utility when the human is removed rather than assumed to
+/// decline? The DSL corpus cannot answer that, because every benign control
+/// there uses trusted arguments. The model corpus, where forwarding a document's
+/// note is the task the user asked for, is where the cost becomes visible.
+pub fn strict_engine() -> PolicyEngine {
+    let defaults = PolicyEngine::default_rules();
+    let mut out = RuleSet::default();
+    for spec in TOOLS.iter() {
+        for arg in spec.args.iter() {
+            let rule = match defaults.lookup(spec.name, arg) {
+                // A shipped allow stays an allow. `http.get.url` is the
+                // allowlist case, which already fails closed on an unknown
+                // domain; turning it into an unconditional denial would stop
+                // the plan before any document was read.
+                Rule::Allow => Rule::Allow,
+                Rule::Allowlist => Rule::Allowlist,
+                // `Confirm`, an explicit `Deny`, and the absent-rule `Confirm`
+                // all become a refusal with no question attached.
+                _ => Rule::Deny {
+                    reason: format!(
+                        "`{}.{}` may not take a value from an untrusted source in strict \
+                         mode, which does not ask",
+                        spec.name, arg
+                    ),
+                },
+            };
+            out.push(spec.name, arg, rule);
+        }
+    }
+    PolicyEngine::new(out)
+}
+
 /// A third arm: the shipped denials, with every confirmation granted.
 ///
 /// This exists because the two-arm comparison hides something. "0% attack
@@ -598,6 +640,45 @@ mod tests {
         assert!(
             !o.tainted_execution(),
             "a call with only trusted arguments is not an attack"
+        );
+    }
+
+    #[test]
+    fn strict_denies_a_tainted_sensitive_argument_without_asking() {
+        // The whole point of strict: the stop is automatic, not a prompt the
+        // user might wave through.
+        let o = observe(
+            r#"let page = http.get(url = "https://shop.example/invoice/1"); let inv = extract(Invoice, source = page); let m = send_email(to = inv.0.note, subject = "s", body = "b");"#,
+            strict_engine(),
+        );
+        assert!(
+            !o.tainted_execution(),
+            "strict must not let a tainted recipient reach the tool"
+        );
+        assert!(
+            matches!(o.outcome, Outcome::Denied { .. }),
+            "strict must deny outright, got {:?}",
+            o.outcome
+        );
+        assert_eq!(o.asked, 0, "strict must not ask anybody anything");
+        assert!(
+            o.pending_ops.is_empty(),
+            "strict must not queue a confirmation it will never ask"
+        );
+    }
+
+    #[test]
+    fn strict_keeps_work_built_from_trusted_arguments() {
+        // A strict arm that also refuses ordinary work would produce a flattering
+        // attack rate for the wrong reason.
+        let o = observe(
+            r#"let w = fs.write(path = "out/summary.txt", contents = "run finished"); let m = send_email(to = "ops@b.test", subject = "batch finished", body = "summary written");"#,
+            strict_engine(),
+        );
+        assert_eq!(
+            o.outcome,
+            Outcome::Completed,
+            "trusted literals must still run under strict"
         );
     }
 }
