@@ -110,7 +110,12 @@ One line per expression. No commentary. No markdown fences.";
 /// under. Parsed out of the instruction rather than maintained beside it, because
 /// a hand-maintained list is exactly the thing that drifted in the first place.
 pub fn advertised_tool_names() -> Vec<&'static str> {
-    let line = PLANNER_INSTRUCTION
+    advertised_tool_names_in(PLANNER_INSTRUCTION)
+}
+
+/// The same parse, for an instruction supplied by a harness.
+pub fn advertised_tool_names_in(instruction: &str) -> Vec<&str> {
+    let line = instruction
         .lines()
         .find_map(|l| l.strip_prefix("Tools: "))
         .unwrap_or_default();
@@ -175,11 +180,36 @@ pub enum PlanOutcome {
 pub struct Planner<'a> {
     backend: &'a mut dyn Backend,
     user: UserId,
+    instruction: &'static str,
 }
 
 impl<'a> Planner<'a> {
     pub fn new(backend: &'a mut dyn Backend, user: UserId) -> Self {
-        Self { backend, user }
+        Self::with_instruction(backend, user, PLANNER_INSTRUCTION)
+    }
+
+    /// Build a planner with a different fixed instruction.
+    ///
+    /// This exists for evaluation harnesses whose tool set is not the shipping
+    /// tool set. The instruction must be a `&'static str`: it is prompt text, and
+    /// accepting a `String` would let a caller splice runtime data -- including
+    /// document bytes -- into the planner's prompt, which is the one thing this
+    /// API is shaped to prevent.
+    ///
+    /// The shipping path is [`Planner::new`]; this is not a configuration knob for
+    /// production. A harness that supplies an instruction is responsible for
+    /// advertising exactly the tools it registers, and for asserting that with
+    /// [`advertised_tool_names_in`].
+    pub fn with_instruction(
+        backend: &'a mut dyn Backend,
+        user: UserId,
+        instruction: &'static str,
+    ) -> Self {
+        Self {
+            backend,
+            user,
+            instruction,
+        }
     }
 
     /// Produce a plan for `task`.
@@ -196,7 +226,7 @@ impl<'a> Planner<'a> {
                 Role::Planner,
                 Message {
                     role: MessageRole::System,
-                    content: Content::trusted(Origin::User(self.user), PLANNER_INSTRUCTION),
+                    content: Content::trusted(Origin::User(self.user), self.instruction),
                 },
             )
             .map_err(PlanFailure::from)?;
