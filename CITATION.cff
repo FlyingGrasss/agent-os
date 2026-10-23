@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this work, please cite it as below."
+type: report
+title: "What Does 0% Mean? A Four-Arm Protocol for Evaluating Prompt-Injection Defenses"
+authors:
+  - family-names: Bozkurt
+    given-names: Emre
+year: 2026
+url: "https://github.com/FlyingGrasss/agent-os"
+repository-code: "https://github.com/FlyingGrasss/agent-os"
+license: CC-BY-4.0
+abstract: >-
+  Prompt-injection defenses for tool-using agents increasingly report
+  attack-success rates at or near zero. A zero can mean five different things:
+  the policy denied the value, the user declined the prompt, the model could not
+  write a runnable plan, the harness rejected the tool name, or the attack never
+  ran. This report proposes a four-arm protocol that varies only the decision
+  layer, separates requested forwarding from exfiltration, and reports what a
+  zero costs. It includes a case study of the AgentOS runtime.
