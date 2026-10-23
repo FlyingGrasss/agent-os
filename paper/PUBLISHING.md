@@ -18,13 +18,16 @@ The submission draft is `what-does-zero-mean.md`; the PDF is
 
 - **Read it once.** You should be able to explain the four arms and why 0/33 becomes 14/33
   with an approving user without notes.
-- **Create an arXiv account** and submit to `cs.CR`. A first submission may require an
-  endorsement; arXiv will tell you.
+- **Create an arXiv account** and submit to `cs.CR`. A first submission requires an
+  endorsement from a qualified cs author (3+ cs arXiv papers in the last five years,
+  older than three months). arXiv emails a code; forward that email to an endorser.
 - **Choose the arXiv license.** Use CC BY 4.0 to match the paper.
 - **Upload `paper/what-does-zero-mean.pdf`.** Add the title, author, abstract, and the
   artifact URL in the metadata.
 - **Optional:** submit to a workshop later, after someone who does not already believe the
   thesis has read it.
+- **If no endorser responds:** the paper is already public at the `paper-v1.0` release. For
+  a DOI without arXiv, connect the repository to Zenodo and cut a release there.
 
 ## Before you click submit
 
