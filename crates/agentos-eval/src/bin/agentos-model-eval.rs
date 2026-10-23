@@ -254,6 +254,14 @@ fn main() -> std::process::ExitCode {
         std::slice::from_ref(&bounded),
     );
     println!();
+
+    println!("\n## Closed types\n");
+    report(
+        "adversarial, approving, closed",
+        std::slice::from_ref(&closed),
+    );
+    println!();
+
     if let Some(approved_bounded_val) = &approved_bounded {
         report(
             "live, approving, bounded",
