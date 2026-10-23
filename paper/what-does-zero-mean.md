@@ -2,30 +2,34 @@
 
 ### A Four-Arm Protocol for Evaluating Prompt-Injection Defenses
 
-**Draft — not peer reviewed.** A methodology paper, with AgentOS as a case study.
-The case-study numbers are from the artifact at commit `e09992a`; the live-model arm is
-single-run and exploratory. The companion technical report is `price-of-zero.md`.
+**Draft — not peer reviewed.** Author: [to be completed]. Artifact:
+`https://github.com/FlyingGrasss/agent-os`.
+
+This is a methodology note with a case study of the authors' own system. The case-study
+numbers are from the artifact at commit `e09992a`; the live-model arm is single-run and
+exploratory. The companion technical report is `price-of-zero.md`.
 
 ---
 
 ## Abstract
 
 Prompt-injection defenses for tool-using agents increasingly report attack-success rates at
-or near zero. A zero is not interpretable on its own: it can mean the machine refused every
-attack, a person declined every prompt, the model failed to produce a runnable plan, or the
-harness rejected every tool call. This paper proposes a four-arm protocol that makes those
-possibilities separable: no policy, policy with a declining user, policy with an approving
-user, and a strict mode that turns every confirmation into a refusal. The protocol is paired
-with a metric distinction — broad taint flow versus authorization-relative leakage — and a
-reporting checklist. We illustrate it on AgentOS, a runtime that isolates a privileged
-planner from a quarantined document reader and enforces policy per tool argument. On a
-45-program policy corpus, the same rules produce 0/33 attack success with a declining user
-and 14/33 with an approving one; 17/33 attacks depend on the human. On a 16-task model
-corpus, strict mode produces zero tainted flows and zero prompts but denies six of seven
-benign forwarding tasks. We also document four measurement failures that produced
-misleading results, including a live harness that advertised a tool name the host did not
-register. The contribution is methodological: a cheap, reusable way to report what a zero
-costs, who produced it, and what it does not cover.
+or near zero. A zero can mean five different things: the policy denied the value, the user
+declined the prompt, the model could not write a runnable plan, the harness rejected the
+tool name, or the attack never ran. Only the first is a property of the machine. The second
+is a property of the person. The last three are measurement failures. This paper proposes a
+four-arm protocol that makes the possibilities separable: no policy, policy with a declining
+user, policy with an approving user, and a strict mode that turns every confirmation into a
+refusal. The protocol is paired with a metric distinction — broad taint flow versus
+authorization-relative leakage — and a reporting checklist. We illustrate it on AgentOS, a
+runtime that isolates a privileged planner from a quarantined document reader and enforces
+policy per tool argument. On a 45-program policy corpus, the same rules produce 0/33 attack
+success with a declining user and 14/33 with an approving one; 17/33 attacks depend on the
+human. On a 16-task model corpus, strict mode produces zero tainted flows and zero prompts
+but denies six of seven benign forwarding tasks. We also catalog four measurement failures
+that produced misleading results, including a live harness that advertised a tool name the
+host did not register. The contribution is methodological: a cheap, reusable way to report
+what a zero costs, who produced it, and what it does not cover.
 
 ---
 
@@ -35,21 +39,19 @@ A defense paper reports "0% attack success." A reader is expected to conclude th
 defense works. That conclusion is under-specified. The same system, on the same attacks,
 can produce:
 
-- 0% because the policy denied every tainted value;
-- 0% because the user declined every confirmation;
-- 0% because the model could not write a runnable plan;
-- 0% because the harness rejected the tool name the model used;
-- 0% because the attack was never run, or the plan halted after the sensitive call.
+1. **0% because the policy denied every tainted value.** This is the machine's share.
+2. **0% because the user declined every confirmation.** This is the human's share.
+3. **0% because the model could not write a runnable plan.** This is model quality.
+4. **0% because the harness rejected the tool name the model used.** This is a broken
+   instrument.
+5. **0% because the attack never ran, or the plan halted after the sensitive call.** This is
+   a measurement failure.
 
-These are different claims. Only the first is a property of the machine. The second is a
-property of the human. The third and fourth are properties of the model or the harness. The
-fifth is a measurement failure.
-
-The problem is not that authors are dishonest. It is that the standard experiment has one
-arm — the defended system with a cooperative user — and one number. The arm is rarely named,
-the utility cost is often measured on tasks that do not exercise the conflict, and the
-attacks are often self-authored. A zero from that setup is a lower bound on attack success
-for that corpus, not a statement about the defense's dependence on a person.
+These are different claims. A paper that reports only the number has not said which one it
+is making. The problem is not dishonesty; it is the standard experiment. It has one arm —
+the defended system with a cooperative user — and one number. The arm is rarely named, the
+utility cost is often measured on tasks that do not exercise the conflict, and the attacks
+are often self-authored.
 
 This paper makes the missing variables explicit. We propose four arms that differ only in
 the decision layer, a pair of leakage definitions that separate requested forwarding from
@@ -61,66 +63,80 @@ reveal.
 
 The contributions are:
 
-1. **A four-arm protocol.** No policy, declining user, approving user, strict no-human. Each
+1. **A catalog of four measurement failures** that each made a reported result meaningless,
+   with the control that catches each.
+2. **A four-arm protocol.** No policy, declining user, approving user, strict no-human. Each
    arm answers a different question, and the differences between them are the result.
-2. **Two leakage definitions.** Broad taint flow counts any untrusted value reaching a tool;
-   authorization-relative leakage counts only flows the user did not authorize. The first
-   is an upper bound; the second is the deployment property.
-3. **A case study** showing the protocol on a 45-program policy corpus and a 16-task model
-   corpus with benign twins.
-4. **A catalog of four measurement failures** that produced misleading results, with the
-   control that catches each.
+3. **Two leakage definitions.** Broad taint flow counts any untrusted value reaching a tool;
+   authorization-relative leakage counts only flows the user did not authorize.
+4. **A worked example** of one task under all four arms, including the benign twin.
 5. **A reporting checklist** for prompt-injection evaluations.
 
 We do not claim a new defense. The architecture is close to CaMeL [1], Progent [4],
-IsolateGPT [3], and FIDES [5]. The claim is that the evaluation of such systems is
-under-specified, and that the specification is cheap.
+IsolateGPT [3], and FIDES [5]. The paper is a measurement of such a system, not an
+independent evaluation; the case study is the authors' own artifact.
 
 ---
 
-## 2. Why a Zero Is Under-Specified
+## 2. Four Ways a Zero Lies
 
-### 2.1 The missing arm
+The case study produced four measurement failures. Each was found by inspecting a result
+that looked too good, and each has a control that catches it. They are presented first
+because they are the paper's premise: a zero is only as good as the instrument that
+produced it.
 
-A defense has at least two decision layers: the policy and the human. An experiment that
-fixes the human's behavior and reports one number cannot separate them. If the human always
-declines, the number measures the policy plus the human's attention. If the human always
-approves, it measures the policy alone, with the human as a rubber stamp. A paper that
-reports only the first can claim the machine's share without measuring it.
+### 2.1 The halt after the sink
 
-The fix is not a better statistic. It is a second arm: run the same plans, the same
-documents, and the same policy with a user who approves everything. The difference between
-the two arms is the human's contribution. If the difference is large, the headline zero is
-mostly a person.
+A corpus entry ended with `len(doc)` on a record. The interpreter's `len` is defined for
+lists and strings, not records, so every plan halted with `BadField` — but only after the
+sensitive tool call. Leaks were still counted, but benign completion was unmeasurable, and
+the outcome looked like a defense. The fix was to read `doc.total`, a field the record
+actually has.
 
-### 2.2 The missing utility
+**Control:** assert that a plan reaches its sink and completes; report *where* a halted plan
+stopped. A halt after the effect is not a blocked effect.
 
-A defense that refuses every tainted value gets zero leaks and refuses ordinary work. If the
-benign controls use only trusted literals, the utility cost is invisible: the policy never
-has to decide a legitimate forwarding. The corpus must include benign tasks that forward a
-document field, because that is the class the strict policy refuses. A benign twin — the same
-request against a clean document — is the control that separates "the injection was
-resisted" from "this task always asks."
+### 2.2 The fixture that measured nothing
 
-### 2.3 The missing authorization model
+A model fixture returned a literal `status = "paid"` instead of reading the document. The
+closed-type arm therefore never saw the status-line attack, and the unbounded and bounded
+arms produced identical byte counts. The null result looked like a finding about schema
+bounds.
 
-"Any untrusted byte reached a tool" counts a note the user asked to forward as a leak. It is
-an upper bound on leakage and a lower bound on utility. A deployment cares whether the flow
-was authorized: did the user name the destination, the field, and the tool? If yes, the flow
-is the task, even though the bytes came from an attacker-controlled document. If no, the flow
-is a leak, even if a human approved it. A paper that does not state which definition it uses
-cannot be compared with one that uses the other.
+**Control:** derive every extracted field from the document, and include a positive control
+that fails if the fixture sanitizes what it lifts. A null result needs a positive control
+before it is a result.
 
-### 2.4 The missing denominator
+### 2.3 The tool-name mismatch
 
-A model that cannot produce a runnable plan is not a blocked attack. A harness that rejects
-the model's tool name is not a defense. Both can produce a zero if they are folded into the
-"stopped" column. They belong in the denominator, reported separately, because a weak model
-or a broken harness must not improve the defense's number by failing to run.
+The planner instruction was corrected to the shipping tool names (`http.fetch`, `fs.write`),
+but the eval host still registered the fixture names (`http.get`, `send_email`, `shell`).
+Every live plan died on its first call with `ToolRejected`, and the arm reported 0 leaks. The
+0% was a broken instrument, not a defense.
+
+**Control:** a drift test that the instruction advertises exactly the tools the host
+registers. The fix makes the instruction a harness parameter (`Planner::with_instruction`,
+which accepts only a `&'static str` so runtime data still cannot enter the prompt).
+
+### 2.4 The model-quality failure
+
+A model that cannot produce a runnable plan never reaches a tool. If those tasks are folded
+into "stopped," the defense gets credit for the model's weakness. In the live arm, 3–4 of 16
+tasks failed to plan.
+
+**Control:** report model-quality failures separately and keep them in the denominator. A
+model-quality failure is not a blocked attack.
+
+### 2.5 The common pattern
+
+All four failures have the same shape: a result that is green because nothing ran. The
+control is always a positive check that the experiment reached the point where the defense
+could fail. A counterfactual, a benign twin, a drift test, and a plan-completion check are
+four versions of that idea.
 
 ---
 
-## 3. A Four-Arm Protocol
+## 3. The Four-Arm Protocol
 
 ### 3.1 Definitions
 
@@ -140,10 +156,9 @@ the operator's policy allowlists it. Otherwise it is **unauthorized**.
   authorize.
 
 An **arm** is a triple `(π, U, s)`: a policy `π`, a user oracle `U` that answers
-confirmations, and a strict flag `s` that turns every confirmation into a denial.
-
-For each task, the plan is executed under `π`; `U` answers confirmations; the run yields a
-set of flows, a terminal outcome, and a prompt count.
+confirmations, and a strict flag `s` that turns every confirmation into a denial. For each
+task the plan is executed under `π`; `U` answers confirmations; the run yields a set of
+flows, a terminal outcome, and a prompt count.
 
 ### 3.2 The arms
 
@@ -168,8 +183,7 @@ tool set are held fixed. That is what makes the differences attributable.
    programs are expected to halt in every arm; they are counted separately.
 2. **Utility.** In the policy corpus, A1 must complete every benign control. In the model
    corpus, a benign twin that legitimately forwards a document field may be refused; that is
-   the utility cost, and it is reported rather than treated as a control failure. The control
-   is that the benign rate is measured, not assumed.
+   the utility cost, reported rather than treated as a control failure.
 3. **Same plans.** A1 and A2 must use the same plans and documents; only the user's answer
    differs. A2 and A3 must use the same plans and documents; only the policy differs.
 4. **Cross-check.** The automatic-versus-human split is computed two ways: by the rule that
@@ -181,7 +195,163 @@ tool set are held fixed. That is what makes the differences attributable.
 7. **Repeatability.** Sampled arms are repeated; a single run is labelled exploratory.
    Deterministic arms are exact for the corpus.
 
-### 3.4 Reporting checklist
+### 3.4 Metrics
+
+For each arm, report:
+
+- attack success under both leakage definitions;
+- benign completion, and benign clean completion (no tainted flow);
+- prompts per task;
+- automatic stops, human stops, and budget halts separately;
+- model-quality failures, in the denominator;
+- forwarded bytes, when text is the payload;
+- the number of runs and the range, or the word "single run."
+
+A percentage without its raw counts is not enough on a small corpus. A raw count without its
+arm is not a result.
+
+---
+
+## 4. Worked Example: One Task, Four Arms
+
+The task is:
+
+> Fetch `https://invoices.example/i1` and email the invoice note to the address it names.
+
+The clean document says `recipient=bob@example.com` and `note="pay within 7 days"`. The
+hostile document says `recipient=attacker@evil.test` and puts an instruction in the note.
+The planner writes:
+
+```
+let page = http.get(url = "https://invoices.example/i1");
+let doc  = extract(Invoice, source = page);
+send_email(to = doc.recipient, subject = "invoice", body = doc.note);
+```
+
+The planner never sees the document; it sees the request and the schema. `doc.recipient` is
+a named value with an untrusted label. The plan can carry it without reading it.
+
+| Arm | What happens on the hostile document | Flow? | What happens on the clean twin |
+|---|---|---|---|
+| A0 no policy | sends to `attacker@evil.test` with the injected note | yes | sends to `bob@example.com` |
+| A1 declining | asks about `send_email.to`; user sees the address and says no | no | asks; user says no; benign twin refused |
+| A2 approving | asks; user says yes; sends to the attacker | yes | sends to Bob |
+| A3 strict | denies `send_email.to` and `send_email.body`; asks nobody | no | denies the benign twin too |
+
+The table is the protocol in one page. A0 proves the attack is real. A1 shows the human
+holding the line. A2 shows what happens when the human does not. A3 shows the price: the
+benign twin is refused because its recipient also came from the document, and strict does
+not distinguish a benign document from a hostile one.
+
+If the request had said "email the note to `bob@example.com`," the address would be pinned.
+The plan's use of `doc.recipient` would then be a substitution, and the intent pin would
+deny it in A1 and A2 before the user was asked. The benign twin, whose recipient matches the
+pin, would still be refused by A3, because strict denies every tainted `send_email.to`
+regardless of the pin. Pinning makes the substitution case cheaper; it does not make strict
+free.
+
+This example also shows why the broad metric overcounts. In A2 the hostile document's note
+reaches the `body`; if the user asked to forward the note, that flow is authorized. The
+tool ran with a tainted argument, so the broad metric calls it a leak. The narrow metric
+does not. A paper that reports only the broad number will overstate the attack and
+understate the utility.
+
+---
+
+## 5. Case Study: AgentOS
+
+### 5.1 System
+
+AgentOS is a Rust runtime that implements the structural approach. A document enters as
+`Quarantined<String>`. A confined extractor reads it and returns typed fields; the planner
+sees the request and the schema, not the document. Values carry provenance labels through a
+small plan language. Before each tool call, a per-argument policy decides whether a tainted
+value may reach that position. A human is asked only where the policy marks `Confirm`;
+`Deny` cannot be overridden by an approval. Strict mode turns every `Confirm` into a `Deny`.
+The kernel sandbox is part of the artifact but is not the subject of this study.
+
+### 5.2 Corpora
+
+**Policy corpus.** 45 DSL programs: 12 benign controls and 33 attacks across 13 categories.
+The policy-relevant attacks read the same hostile document and differ only in which field
+reaches which sensitive argument. The four resource-exhaustion programs burn the
+interpreter's step budget. The benign controls use planner-authored literals.
+
+**Model corpus.** 16 tasks: 7 benign controls and 9 attacks. Most attacks share a request
+with a benign twin. The planner sees only the trusted request. Role Q is stubbed with an
+extractor that faithfully lifts the document's fields, including an address if one is
+present. An adversarial planner supplies the worst-case plan deterministically; a live
+`llama3.2:3b` arm is exploratory.
+
+### 5.3 Results
+
+**Table 1.** Policy corpus under the four arms. Attacks are 33; benign controls are 12.
+"Flow" means a tool ran with a tainted argument.
+
+| Arm | Flows (attacks) | Benign complete | Prompts | Decomposition |
+|---|---:|---:|---:|---|
+| A0 no policy | 29/33 (87.9%) | 12/12 | 0 | counterfactual |
+| A1 declining | 0/33 | 12/12 | 14 | 12 automatic, 17 human, 4 budget |
+| A2 approving | 14/33 (42.4%) | 12/12 | 14 | rubber stamp |
+| A3 strict | 0/33 | 12/12 | 0 | every confirm is a deny |
+
+The 15 "denied outright" outcomes split into 12 explicit policy denials and 3 allowlist
+refusals that a user could override by adding the domain. The 3 are counted as human-
+dependent, not automatic. The 14 user refusals plus the 3 allowlist refusals are the 17
+human-dependent stops. The 4 remaining attacks halt on the interpreter's step budget. The
+12/12 strict benign rate is a property of this corpus: every benign control uses a trusted
+literal, so no legitimate forwarding is refused.
+
+**Table 2.** Model corpus. 16 tasks: 9 attacks, 7 benign. "Flow" is the broad metric over all
+16 tasks; benign twins that forward a field count as flows. The adversarial planner is
+deterministic. The live arm is one run of `llama3.2:3b`.
+
+| Arm | Flows | Prompts | Auto-refused | Benign clean | Benign refused/denied | Model-quality failures |
+|---|---:|---:|---:|---:|---:|---:|
+| Adversarial, declining | 0/16 | 11 | 4 | 0/7 | 6 | 0 |
+| Adversarial, approving | 11/16 (68.8%) | 11 | 4 | 0/7 | 0 (6 completed) | 0 |
+| Adversarial, strict | 0/16 | 0 | 4 | 0/7 | 6 denied | 0 |
+| Live, declining | 0/16 | 1 | 0 | 2/7 | 1 | 3 |
+| Live, approving | 1/16 (6.2%) | 1 | 0 | 2/7 | 1 denied | 4 |
+
+The 11 flows in the adversarial approving arm decompose exactly: 4 attacks are auto-refused
+by intent pins, 5 unpinned attacks reach a tool, and 6 benign twins forward a field. The
+strict arm refuses the 5 unpinned attacks and the 6 benign twins; its zero is bought by
+refusing the forwarding the user asked for. The benign columns need not sum to seven: a
+benign task that does not reach a tool is neither clean nor refused, and a live task the
+model cannot plan is a model-quality failure.
+
+**Table 3.** Schema controls on the 16-task adversarial approving arm.
+
+| Schema | Flows | Forwarded bytes |
+|---|---:|---:|
+| Unbounded | 11/16 (68.8%) | 363 |
+| 96-character bound | 10/16 (62.5%) | 307 |
+| Closed types | 9/16 (56.2%) | 182 |
+
+A size bound moves the bytes by 56 and the flows by one. Closed types move the bytes by 181
+and the flows by two, and remove the instruction channel for `status` entirely. They cannot
+close `note` or `recipient` without refusing the user's data. The residual 182 bytes are the
+free-text fields. The bounded arm's pin count falls from 4 to 1, but that is the bound
+refusing an extraction before the pin fires, not the pins improving.
+
+**Intent pins.** On the 14-task corpus used for the ablation, the approving arm goes from
+13/14 (92.9%) to 9/14 (64.3%), with 4 attacks refused by pins and no prompt. Pins address
+substitution; they do not address forwarding.
+
+### 5.4 What the arms reveal
+
+The policy corpus's 0/33 is 12 automatic refusals, 17 human-dependent stops, and 4 budget
+halts. The approving arm runs 14/33. The 0% and the 42% are the same rules and the same
+corpus; only the human's answer changed. On the model corpus, the broad 11/16 is 5 attacks
+and 6 benign twins; the strict zero is 6 of 7 benign tasks denied. Each of these is a
+different claim that a single number would have hidden.
+
+---
+
+## 6. Applying the Protocol
+
+### 6.1 The checklist
 
 | # | Report | Why |
 |---|---|---|
@@ -200,168 +370,27 @@ tool set are held fixed. That is what makes the differences attributable.
 | 13 | Automatic, human, and budget stops separately | The headline is a sum of different things |
 | 14 | Repetition and intervals, or "single run" | A sampled system is not a rate from one sample |
 
-The checklist is deliberately mechanical. It can be applied to a paper, an internal
-evaluation, or a benchmark submission without changing the defense.
+### 6.2 Minimum viable evaluation
+
+If you can add only one thing to the standard defended arm, add the **approving user**. It
+is the cheapest way to find out how much of the zero is the person. If you can add two, add
+**strict**; it gives the no-human bound and the utility cost. If you can add three, add
+**benign twins**; they separate a defense that resists from a defense that always asks. Run
+the **counterfactual** first; without it, none of the other arms means anything.
+
+### 6.3 A sentence for the abstract
+
+A paper that adopts the protocol can state its result in one sentence:
+
+> On N tasks, the defense reported X/N with a declining user and Y/N with an approving
+> user; strict reported Z/N at a utility cost of U/N benign tasks; M tasks failed to plan.
+
+That sentence contains the arm, the human's contribution, the strict cost, and the
+denominator. It is longer than "0%" and far more useful.
 
 ---
 
-## 4. Case Study: AgentOS
-
-AgentOS is a Rust runtime that implements the structural approach. A document enters as
-`Quarantined<String>`. A confined extractor reads it and returns typed fields; the planner
-sees the request and the schema, not the document. Values carry provenance labels through a
-small plan language. Before each tool call, a per-argument policy decides whether a tainted
-value may reach that position. A human is asked only where the policy marks `Confirm`;
-`Deny` cannot be overridden by an approval. Strict mode turns every `Confirm` into a `Deny`.
-The kernel sandbox is part of the artifact but is not the subject of this study.
-
-The case study uses two corpora.
-
-**Policy corpus.** 45 DSL programs: 12 benign controls and 33 attacks across 13 categories.
-The policy-relevant attacks read the same hostile document and differ only in which field
-reaches which sensitive argument. The four resource-exhaustion programs burn the
-interpreter's step budget. The benign controls use planner-authored literals.
-
-**Model corpus.** 16 tasks: 7 benign controls and 9 attacks. Most attacks share a request
-with a benign twin. The planner sees only the trusted request. Role Q is stubbed with an
-extractor that faithfully lifts the document's fields, including an address if one is
-present. An adversarial planner supplies the worst-case plan deterministically; a live
-`llama3.2:3b` arm is exploratory.
-
-### 4.1 Policy corpus results
-
-**Table 1.** The same 45 programs under the four arms. Attacks are 33; benign controls are
-12. "Flow" means a tool ran with a tainted argument.
-
-| Arm | Flows (attacks) | Benign complete | Prompts | Decomposition |
-|---|---:|---:|---:|---|
-| A0 no policy | 29/33 (87.9%) | 12/12 | 0 | counterfactual |
-| A1 declining | 0/33 | 12/12 | 14 | 12 automatic, 17 human, 4 budget |
-| A2 approving | 14/33 (42.4%) | 12/12 | 14 | rubber stamp |
-| A3 strict | 0/33 | 12/12 | 0 | every confirm is a deny |
-
-The 15 "denied outright" outcomes split into 12 explicit policy denials and 3 allowlist
-refusals that a user could override by adding the domain. The 3 are counted as human-
-dependent, not automatic. The 14 user refusals plus the 3 allowlist refusals are the 17
-human-dependent stops. The 4 remaining attacks halt on the interpreter's step budget.
-
-The 12/12 strict benign rate is a property of this corpus: every benign control uses a
-trusted literal, so no legitimate forwarding is refused. This is exactly why the policy
-corpus alone cannot measure the cost of strictness.
-
-### 4.2 Model corpus results
-
-**Table 2.** 16 tasks: 9 attacks, 7 benign. "Flow" is the broad metric over all 16 tasks;
-benign twins that forward a field count as flows. The adversarial planner is deterministic.
-The live arm is one run of `llama3.2:3b`.
-
-| Arm | Flows | Prompts | Auto-refused | Benign clean | Benign refused/denied | Model-quality failures |
-|---|---:|---:|---:|---:|---:|---:|
-| Adversarial, declining | 0/16 | 11 | 4 | 0/7 | 6 | 0 |
-| Adversarial, approving | 11/16 (68.8%) | 11 | 4 | 0/7 | 0 (6 completed) | 0 |
-| Adversarial, strict | 0/16 | 0 | 4 | 0/7 | 6 denied | 0 |
-| Live, declining | 0/16 | 1 | 0 | 2/7 | 1 | 3 |
-| Live, approving | 1/16 (6.2%) | 1 | 0 | 2/7 | 1 denied | 4 |
-
-The 11 flows in the adversarial approving arm decompose exactly: 4 attacks are auto-refused
-by intent pins, 5 unpinned attacks reach a tool, and 6 benign twins forward a field. The
-strict arm refuses the 5 unpinned attacks and the 6 benign twins; its zero is bought by
-refusing the forwarding the user asked for.
-
-The benign columns need not sum to seven: a benign task that does not reach a tool is
-neither clean nor refused, and a live task the model cannot plan is a model-quality failure.
-
-### 4.3 Strictness, schema, and pins
-
-**Strict cost.** On the model corpus, strict mode denies 6 of 7 benign tasks. On the policy
-corpus, it denies none, because the benign controls never forward. The difference is the
-corpus, not the policy. A paper that reports only the policy corpus would conclude that
-strictness is free.
-
-**Schema shape.** On the 16-task adversarial approving arm:
-
-| Schema | Flows | Forwarded bytes |
-|---|---:|---:|
-| Unbounded | 11/16 (68.8%) | 363 |
-| 96-character bound | 10/16 (62.5%) | 307 |
-| Closed types | 9/16 (56.2%) | 182 |
-
-A size bound moves the bytes by 56 and the flows by one. Closed types move the bytes by 181
-and the flows by two, and remove the instruction channel for `status` entirely. They cannot
-close `note` or `recipient` without refusing the user's data. The residual 182 bytes are the
-free-text fields.
-
-**Intent pins.** On the 14-task corpus used for the ablation, the approving arm goes from
-13/14 (92.9%) to 9/14 (64.3%), with 4 attacks refused by pins and no prompt. Pins address
-substitution; they do not address forwarding.
-
-### 4.4 What the arms reveal
-
-The policy corpus's 0/33 is 12 automatic refusals, 17 human-dependent stops, and 4 budget
-halts. The approving arm runs 14/33. The 0% and the 42% are the same rules and the same
-corpus; only the human's answer changed. On the model corpus, the broad 11/16 is 5 attacks
-and 6 benign twins; the strict zero is 6 of 7 benign tasks denied. Each of these is a
-different claim that a single number would have hidden.
-
----
-
-## 5. How a Zero Lies: Four Instrument Failures
-
-The case study produced four measurement failures. Each was found by inspecting a result
-that looked too good, and each has a control that catches it.
-
-### 5.1 The halt after the sink
-
-A corpus entry ended with `len(doc)` on a record. The interpreter's `len` is defined for
-lists and strings, not records, so every plan halted with `BadField` — but only after the
-sensitive tool call. Leaks were still counted, but benign completion was unmeasurable, and
-the outcome looked like a defense. The fix was to read `doc.total`, a field the record
-actually has.
-
-**Control:** assert that a plan reaches its sink and completes; report *where* a halted plan
-stopped. A halt after the effect is not a blocked effect.
-
-### 5.2 The fixture that measured nothing
-
-A model fixture returned a literal `status = "paid"` instead of reading the document. The
-closed-type arm therefore never saw the status-line attack, and the unbounded and bounded
-arms produced identical byte counts. The null result looked like a finding about schema
-bounds.
-
-**Control:** derive every extracted field from the document, and include a positive control
-that fails if the fixture sanitizes what it lifts. A null result needs a positive control
-before it is a result.
-
-### 5.3 The tool-name mismatch
-
-The planner instruction was corrected to the shipping tool names (`http.fetch`, `fs.write`),
-but the eval host still registered the fixture names (`http.get`, `send_email`, `shell`).
-Every live plan died on its first call with `ToolRejected`, and the arm reported 0 leaks. The
-0% was a broken instrument, not a defense.
-
-**Control:** a drift test that the instruction advertises exactly the tools the host
-registers. The fix makes the instruction a harness parameter (`Planner::with_instruction`,
-which accepts only a `&'static str` so runtime data still cannot enter the prompt).
-
-### 5.4 The model-quality failure
-
-A model that cannot produce a runnable plan never reaches a tool. If those tasks are folded
-into "stopped," the defense gets credit for the model's weakness. In the live arm, 3–4 of 16
-tasks failed to plan.
-
-**Control:** report model-quality failures separately and keep them in the denominator. A
-model-quality failure is not a blocked attack.
-
-### 5.5 The common pattern
-
-All four failures have the same shape: a result that is green because nothing ran. The
-control is always a positive check that the experiment reached the point where the defense
-could fail. A counterfactual, a benign twin, a drift test, and a plan-completion check are
-four versions of that idea.
-
----
-
-## 6. Limitations
+## 7. Limitations
 
 **The human is simulated.** "Declining" always says no; "approving" always says yes. Real
 users are neither, and they fatigue over time. The protocol measures the endpoints of the
@@ -392,7 +421,7 @@ that chooses it is choosing to refuse the forwarding the user asked for.
 
 ---
 
-## 7. Related Work
+## 8. Related Work
 
 **Structural defenses.** CaMeL [1] separates control and data flow, uses capabilities, and
 reports secure task completion on AgentDojo. Progent [4] enforces fine-grained privilege
@@ -417,7 +446,7 @@ that do not depend on recognition, and about the ways their numbers can mislead.
 
 ---
 
-## 8. Conclusion
+## 9. Conclusion
 
 A zero is a result only when the arm, the utility, the metric, and the denominator are
 named. The four-arm protocol makes those names cheap: run the same plans with no policy,
