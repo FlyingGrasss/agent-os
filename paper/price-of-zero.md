@@ -2,7 +2,8 @@
 
 ### Measuring the Utility and Human Cost of Prompt-Injection Defenses
 
-**Draft — not peer reviewed.** This draft is derived from the AgentOS artifact at commit
+**Draft — not peer reviewed.** This is the case-study technical report. The methodology
+paper is `what-does-zero-mean.md`. It is derived from the AgentOS artifact at commit
 `e09992a`. The deterministic results are reproducible from the repository. The live-model
 results are single-run and are marked exploratory throughout. Numbers are descriptive, not
 statistical estimates.
