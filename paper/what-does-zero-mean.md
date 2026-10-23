@@ -2,8 +2,10 @@
 
 ### A Four-Arm Protocol for Evaluating Prompt-Injection Defenses
 
-**Draft — not peer reviewed.** Author: [to be completed]. Artifact:
+**Draft — not peer reviewed.** Author: Emre Bozkurt. Artifact:
 `https://github.com/FlyingGrasss/agent-os`.
+
+© 2026 Emre Bozkurt. This paper is licensed under CC BY 4.0.
 
 This is a methodology note with a case study of the authors' own system. The case-study
 numbers are from the artifact at commit `e09992a`; the live-model arm is single-run and

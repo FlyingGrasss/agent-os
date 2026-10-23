@@ -1,0 +1,13 @@
+{
+  "stylesheet": ["paper/paper.css"],
+  "pdf_options": {
+    "format": "A4",
+    "printBackground": true,
+    "margin": {
+      "top": "18mm",
+      "bottom": "18mm",
+      "left": "16mm",
+      "right": "16mm"
+    }
+  }
+}
