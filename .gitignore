@@ -2,3 +2,5 @@ target/
 .vscode/
 .idea/
 target/vcenv.txt
+__pycache__/
+*.pyc

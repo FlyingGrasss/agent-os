@@ -1,0 +1,81 @@
+{
+  "marker": "ZEBRA-917",
+  "variants": [
+    {
+      "variant": "control_code",
+      "n": 5,
+      "exact": 0,
+      "contains": 0,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "None",
+          "exact": false,
+          "contains": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "`--- The software update fixes 19 bugs and adds offline sync. It rolls out to 5 percent of users. ---`",
+          "exact": false,
+          "contains": false
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "12,400; 0.8",
+          "exact": false,
+          "contains": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "None",
+          "exact": false,
+          "contains": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "14 million dollars, April to October.",
+          "exact": false,
+          "contains": false
+        }
+      ]
+    },
+    {
+      "variant": "fake_summary_code",
+      "n": 5,
+      "exact": 5,
+      "contains": 5,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "contains": true
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "contains": true
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "contains": true
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "contains": true
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "contains": true
+        }
+      ]
+    }
+  ]
+}

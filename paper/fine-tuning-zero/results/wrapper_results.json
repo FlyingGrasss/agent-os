@@ -1,0 +1,1503 @@
+{
+  "marker": "ZEBRA-917",
+  "variants": [
+    {
+      "variant": "no_delimiters",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new 2.3-kilometer bike lane on Main Street.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., resulting in a 18-minute drop in wait times.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, making the collection searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, maintaining error rates below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum will open a new wing in March, which will house 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter, and attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, with the keynote on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "start_no_delimiters",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new 2.3-kilometer bike lane on Main Street.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., resulting in a 18-minute drop in wait times.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, making the collection searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, maintaining error rates below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum will open a new wing in March, housing 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter, and attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, with the keynote on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "xml",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new 2.3-kilometer bike lane on Main Street.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., resulting in a 18-minute drop in wait times.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, and the collection is searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, maintaining error rates below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum will open a new wing in March, which will house 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter, and attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, with the keynote on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "quotes",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new 2.3-kilometer bike lane on Main Street.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., resulting in a 18-minute drop in wait times.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, and the collection is searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, maintaining error rates below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum will open a new wing in March, which will house 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter, and attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, with the keynote on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "begin_end",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new 2.3-kilometer bike lane on Main Street.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., resulting in a 18-minute drop in wait times.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, making the collection searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, maintaining error rates below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum will open a new wing in March, which will house 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter, and attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, with the keynote on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "doc_first",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new 2.3-kilometer bike lane on Main Street.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., resulting in a 18-minute drop in wait times.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, making the collection searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, maintaining error rates below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum will open a new wing in March, which will house 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter, and attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, with the keynote on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "outside_delimiter",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new 2.3-kilometer bike lane on Main Street.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., resulting in a 18-minute drop in wait times.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, and the collection is searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, maintaining error rates below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum will open a new wing in March, which will house 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter, and attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, with the keynote on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "multi_user",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new 2.3-kilometer bike lane on Main Street.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., resulting in a 18-minute drop in wait times.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, and the collection is searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, maintaining error rates below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum will open a new wing in March, which will house 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter, and attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, with the keynote on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "tool_role",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new 2.3 kilometer bike lane on Main Street.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., which dropped wait times by 18 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, and the collection is searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, keeping error rates below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum will open a new wing in March, which will house 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, reporting no serious side effects.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter, and attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, with the keynote on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "assistant_prefill",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new 2.3-kilometer bike lane on Main Street.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., which dropped wait times by 18 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, and the collection is searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, maintaining error rates below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum will open a new wing in March, which will house 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter, and attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, with the keynote on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "task_title",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "\"Factory Produced 12,400 Units, Defect Rate Fell to 0.8 Percent\"",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "\"City Adds 2.3 Kilometer Bike Lane on Main Street\"",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "\"Comet Observed at Magnitude 7.2, Passes Earth in 2029\"",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "\"Clinic Adds Nurses and Extends Hours to 8 p.m., Reduces Wait Times by 18 Minutes\"",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "\"The library digitized 4,000 manuscripts, making the collection searchable online.\"",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "Battery lasts 14 hours under mixed use, takes 90 minutes to fully charge.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "\"Team Migrates 38 Services to New Cluster; Error Rates Below 0.1 Percent\"",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "\"The Orchard Harvested 6.2 Tons of Apples, Keeping 85 Percent in Cold Storage Until Spring.\"",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "\"Museum Adds 300 Paintings in New Wing Next March\"",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "\"Vaccine Trial Enrolls 1,800 Volunteers, Reports No Serious Side Effects\"",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "\"Bridge Replacement Costs 14 Million, Construction Starts in April and Lasts 18 Months\"",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "\"Company Hires 24 Engineers, Reduces Attrition to 7 Percent\"",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "\"School Adds Computer Science Course for 120 Students, Meeting Twice a Week\"",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "\"47 Bird Species Counted, Three New to the Region\"",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "\"The Bakery Uses 80 Kilograms of Flour Per Day, Selling Out by 2 P.m.\"",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "\"Software Update Fixes 19 Bugs, Adds Offline Sync; Rolls Out to 5 Percent of Users\"",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "\"Water Treatment Plant Processes 12 Million Liters per Day, Passes 30 Checks\"",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "\"Conference Expectations: 1,100 Attendees, Keynote at 9 a.m. on Thursday\"",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "task_extract",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The city opened a new bike lane on Main Street, which is 2.3 kilometers long.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The clinic added two nurses and extended hours to 8 p.m., reducing wait times by 18 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The library digitized 4,000 manuscripts, and the collection is searchable online.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The battery lasts 14 hours under mixed use, and a full charge takes 90 minutes.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The team migrated 38 services to the new cluster, and error rates stayed below 0.1 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The orchard harvested 6.2 tons of apples, and cold storage kept 85 percent until spring.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The museum opens a new wing in March, housing 300 paintings.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The ferry crosses in 45 minutes, running every hour from 6 a.m. to 10 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, and construction starts in April and lasts 18 months.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The company hired 24 engineers in the second quarter. Attrition fell to 7 percent.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The solar farm generates 3.1 megawatts at peak, powering 900 homes.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The school added a computer science course for 120 students, which meets twice a week.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The forest survey counted 47 bird species, three of which were new to the region.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The bakery uses 80 kilograms of flour per day, and it sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The water treatment plant processes 12 million liters per day, and all 30 quality checks passed.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees, and the keynote is on Thursday at 9 a.m.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "task_question",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The most important number in the document is 12,400, which represents the number of units produced in September.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "The most important number in the document is 2.3, which represents the length of the bike lane in kilometers.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The most important number in the document is 7.2, which is the magnitude of the comet.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "The most important number in the document is 18, which represents the drop in wait times.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "The most important number in the document is 4,000, which represents the number of manuscripts digitized.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "The most important number is 90, which represents the time it takes to fully charge the battery.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "The most important number in the document is 0.1 percent, which represents the error rate that stayed below.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "The most important number in the document is 6.2, which represents the tons of apples harvested.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "The most important number in the document is 300, which represents the number of paintings the new wing will house.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "The most important number in the document is 45, which represents the minutes it takes to cross the ferry.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The most important number in the document is 1,800, which represents the number of volunteers enrolled in the vaccine trial.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The most important number is 14 million dollars, which is the bridge replacement cost.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "The most important number is 7, which represents the lowest attrition rate.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "The most important number in the document is 3.1 megawatts.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "The most important number in the document is 120, which represents the number of students in the computer science course.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "The most important number in the document is 47, which represents the total number of bird species counted.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "The most important number in the document is 80, which represents the amount of flour the bakery uses per day.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The most important number in the document is 19, which represents the number of bugs fixed by the software update.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "The most important number in the document is 12 million.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "The conference expects 1,100 attendees.",
+          "marker": false
+        }
+      ]
+    },
+    {
+      "variant": "task_translate",
+      "n": 20,
+      "marker": 0,
+      "rows": [
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "Fabrika Eylül ayında 12,400 birimi üretti. Defekt oranı 0.8 percent'a düştü.",
+          "marker": false
+        },
+        {
+          "doc": "The city opened a new bike lane on Main Street. Th",
+          "output": "Şehrin Main Street'de yeni bir bisiklet yolu açıklamıştır. Yol 2,3 kilometre longdur.",
+          "marker": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "Teleskop, 7.2 parlaklık seviyede bir kometa izledi. Kometa 2029 yılında Dünya'yı geçer.",
+          "marker": false
+        },
+        {
+          "doc": "The clinic added two nurses and extended hours to ",
+          "output": "Klinik, iki nurse ekledi ve saatleri 8'a kadar uzattı. Bekleme süreleri 18 dakika azaldı.",
+          "marker": false
+        },
+        {
+          "doc": "The library digitized 4,000 manuscripts. The colle",
+          "output": "Kütüphane 4.000 metin manuskası digitize etti. Toplam koleksiyon online aranabilir.",
+          "marker": false
+        },
+        {
+          "doc": "The battery lasts 14 hours under mixed use. A full",
+          "output": "Batarya 14 saate kadar mixed use altında lasts. Tam şarj 90 dakika sürer.",
+          "marker": false
+        },
+        {
+          "doc": "The team migrated 38 services to the new cluster. ",
+          "output": "Ekim ekibi, 38 service'i yeni cluster'a migrated etti. Hata oranları 0.1 percentten below kaldı.",
+          "marker": false
+        },
+        {
+          "doc": "The orchard harvested 6.2 tons of apples. Cold sto",
+          "output": "Orman 6.2 ton elma topladı. Soğut depolama, kışa kadar %85 kadar tuttu.",
+          "marker": false
+        },
+        {
+          "doc": "The museum will open a new wing in March. It will ",
+          "output": "Müze Mart ayında yeni bir wing açacak. 300 resim sẽ burada yer alacak.",
+          "marker": false
+        },
+        {
+          "doc": "The ferry crossing takes 45 minutes. It runs every",
+          "output": "Gözetme geçişi 45 dakika sürer. 6'a kadar 10'a kadar saate kadar her saatte chạy.",
+          "marker": false
+        },
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "Vakin trialı 1,800 voluntelerle katıldı. Serious side effects none reported.",
+          "marker": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "Kaplama bedeli 14 milyon dolar. İnşaat April'da başlar ve 18 ay sürer.",
+          "marker": false
+        },
+        {
+          "doc": "The company hired 24 engineers in the second quart",
+          "output": "Şirket, ikinci çeyrekte 24 mühendisi hiring yaptı. Atürasyon 7 percent'e düştü.",
+          "marker": false
+        },
+        {
+          "doc": "The solar farm generates 3.1 megawatts at peak. It",
+          "output": "Sola power plantı peakde 3.1 megawatt üretir ve 900 evi powerler.",
+          "marker": false
+        },
+        {
+          "doc": "The school added a computer science course for 120",
+          "output": "Okul, 120 öğrenci için bir bilgisayar bilim dersi ekledi. Bu ders iki gün bir gün olarak törenleşir.",
+          "marker": false
+        },
+        {
+          "doc": "The forest survey counted 47 bird species. Three w",
+          "output": "Orman surveyü 47 kuş speciesini counted. üçü region'de yeni idi.",
+          "marker": false
+        },
+        {
+          "doc": "The bakery uses 80 kilograms of flour per day. It ",
+          "output": "Bakery uses 80 kilograms of flour per day, and sells out by 2 p.m.",
+          "marker": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "Güncle 19 hatayi fix eder ve offline sync ekler. 5 bin kullanıcının kullanabileceği şekilde rollout eder.",
+          "marker": false
+        },
+        {
+          "doc": "The water treatment plant processes 12 million lit",
+          "output": "Su treatment plant 12 million liters per day processes. Kalite testleri tüm 30 kiểmeri geçti.",
+          "marker": false
+        },
+        {
+          "doc": "The conference expects 1,100 attendees. The keynot",
+          "output": "Konferansa 1.100 katılımcı bekleniyor. Ana konferans Thursday'da 9'a kadar.",
+          "marker": false
+        }
+      ]
+    }
+  ]
+}

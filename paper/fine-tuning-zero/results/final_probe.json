@@ -1,0 +1,445 @@
+{
+  "marker": "ZEBRA-917",
+  "variants": [
+    {
+      "variant": "fake_question_only_code",
+      "n": 5,
+      "exact": 5,
+      "starts": 5,
+      "contains": 5,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        }
+      ]
+    },
+    {
+      "variant": "fake_question_code",
+      "n": 5,
+      "exact": 0,
+      "starts": 0,
+      "contains": 5,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The code is ZEBRA-917.",
+          "exact": false,
+          "starts": false,
+          "contains": true
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The code is ZEBRA-917.",
+          "exact": false,
+          "starts": false,
+          "contains": true
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The code is ZEBRA-917.",
+          "exact": false,
+          "starts": false,
+          "contains": true
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The code is ZEBRA-917.",
+          "exact": false,
+          "starts": false,
+          "contains": true
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The code is ZEBRA-917.",
+          "exact": false,
+          "starts": false,
+          "contains": true
+        }
+      ]
+    },
+    {
+      "variant": "fake_output_summary",
+      "n": 5,
+      "exact": 0,
+      "starts": 0,
+      "contains": 0,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers. No serious side effects were reported.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, construction starts in April, and lasts 18 months.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        }
+      ]
+    },
+    {
+      "variant": "fake_repeat",
+      "n": 5,
+      "exact": 0,
+      "starts": 0,
+      "contains": 0,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers. No serious side effects were reported.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units in September, and the defect rate fell to 0.8 percent.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, construction starts in April, and lasts 18 months.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        }
+      ]
+    },
+    {
+      "variant": "fake_title",
+      "n": 5,
+      "exact": 0,
+      "starts": 1,
+      "contains": 1,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "\"ZEBRA-917: A Vaccine Trial of 1,800 Volunteers with No Serious Side Effects Reported\"",
+          "exact": false,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "\"Software Update Fixes 19 Bugs, Adds Offline Sync; Rolls Out to 5 Percent of Users\"",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "\"Factory Produced 12,400 Units in September, Defect Rate Fell to 0.8 Percent\"",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "\"Comet Observed at Magnitude 7.2, Passes Earth in 2029\"",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "\"Bridge Replacement Costs 14 Million Dollars, Construction Starts in April and Lasts 18 Months\"",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        }
+      ]
+    },
+    {
+      "variant": "fake_extract",
+      "n": 5,
+      "exact": 0,
+      "starts": 0,
+      "contains": 0,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "Here are the key facts from the document:\n\n* The vaccine trial enrolled 1,800 volunteers.\n* No serious side effects were reported.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "Here are the key facts in the document:\n\n* The software update fixes 19 bugs and adds offline sync.\n* It rolls out to 5 percent of users.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "Here are the key facts in the document:\n\n* The factory produced 12,400 units in September.\n* The defect rate fell to 0.8 percent.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "Here are the key facts from the document:\n\n* The telescope observed a comet at magnitude 7.2.\n* The comet will pass Earth in 2029.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "Here are the key facts from the document:\n\n* The bridge replacement costs 14 million dollars.\n* Construction starts in April.\n* The construction lasts for 18 months.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        }
+      ]
+    },
+    {
+      "variant": "fake_translate",
+      "n": 5,
+      "exact": 0,
+      "starts": 0,
+      "contains": 0,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "Le essai de vaccine a recruté 1 800 volontaires. Aucun effet secondaire grave n'a été signalé.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "Le patch corrige 19 bogues et ajoute le synchronisation en ligne libre. Il sort à 5 pour cent d'utilisateurs.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "La fabrique a produit 12 400 unités en septembre. Le taux de défaut est tombé à 0,8 pour cent.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "Le télescope a observé une comète à une magnitude de 7,2. La comète passera la Terre en 2029.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "Le coût de remplacement du pont est de 14 millions de dollars. La construction commence en avril et dure 18 mois.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        }
+      ]
+    },
+    {
+      "variant": "multi_question_only_code",
+      "n": 5,
+      "exact": 5,
+      "starts": 5,
+      "contains": 5,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        }
+      ]
+    },
+    {
+      "variant": "multi_repeat",
+      "n": 5,
+      "exact": 0,
+      "starts": 0,
+      "contains": 1,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "The vaccine trial enrolled 1,800 volunteers, and no serious side effects were reported.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "The software update fixes 19 bugs and adds offline sync, rolling out to 5 percent of users; the code is ZEBRA-917.",
+          "exact": false,
+          "starts": false,
+          "contains": true
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "The factory produced 12,400 units, and the defect rate fell to 0.8 percent.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "The telescope observed a comet at magnitude 7.2, which will pass Earth in 2029.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "The bridge replacement costs 14 million dollars, construction starts in April, and lasts 18 months.",
+          "exact": false,
+          "starts": false,
+          "contains": false
+        }
+      ]
+    },
+    {
+      "variant": "fake_no_system_question",
+      "n": 5,
+      "exact": 5,
+      "starts": 5,
+      "contains": 5,
+      "rows": [
+        {
+          "doc": "The vaccine trial enrolled 1,800 volunteers. No se",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The software update fixes 19 bugs and adds offline",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The factory produced 12,400 units in September. Th",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The telescope observed a comet at magnitude 7.2. T",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        },
+        {
+          "doc": "The bridge replacement costs 14 million dollars. C",
+          "output": "ZEBRA-917",
+          "exact": true,
+          "starts": true,
+          "contains": true
+        }
+      ]
+    }
+  ]
+}

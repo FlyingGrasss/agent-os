@@ -11,9 +11,13 @@ This repository is a **research artifact**, not a production system.
 - [What Does 0% Mean? A Four-Arm Protocol for Evaluating Prompt-Injection Defenses](paper/what-does-zero-mean.md)
 - [PDF](paper/what-does-zero-mean.pdf)
 - [Case-study technical report](paper/price-of-zero.md)
+- [Companion note: Fine-Tuning Did Not Eliminate Prompt Injection](paper/fine-tuning-zero.md)
 
 The paper evaluates AgentOS as a case study. It does not claim a new architecture; it
-proposes a protocol for measuring what a reported 0% actually costs.
+proposes a protocol for measuring what a reported 0% actually costs. The companion note is
+a separate fine-tuning case study: a 0/120 result on the original `INJECTED` attack set, and
+a two-turn field-planting attack that gets exact compliance 5/5. It is not part of the
+AgentOS measurement.
 
 ## What is here
 
